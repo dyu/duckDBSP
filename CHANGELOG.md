@@ -61,6 +61,13 @@ Python probes: 30/30 exit 0 on the `duckdb==2.0.0` wheel. Two needed
 `conn.sql(...).fetchone()` changed to `conn.execute(...).fetchone()`, because
 the 2.0.0 Python client removed `fetchone()` from relations.
 
+**Follow-up: `build.sh` no longer builds the test binaries by default.**
+`DBSP_BUILD_TESTS` is a CMake option that a plain `cmake` leaves ON.
+`build.sh` passes it OFF unless the environment sets it. With
+`test/build_test` present, the copy under `build/test` was ~3GB of duplicate
+binaries, and it came back on every build. `DBSP_BUILD_TESTS=ON ./build.sh`
+restores it.
+
 45/45 ctest green.
 
 ## Perf: declared view keys — the delta DELETE stops scanning every column — 2026-09-12

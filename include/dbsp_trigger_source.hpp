@@ -467,7 +467,9 @@ inline bool sink_exists(duckdb::Connection &con, const std::string &catalog,
 /// duckdb_triggers() is the route because trigger entries are not reachable
 /// through Catalog::GetEntry: the generic entry lookup returns nothing for
 /// CatalogType::TRIGGER_ENTRY even when the trigger is right there in
-/// duckdb_triggers() (measured on v2.0.0-alpha39998).
+/// duckdb_triggers() (measured on v2.0.0-alpha39998). Unchanged in v2.0.0:
+/// triggers still live on their table, and DuckSchemaEntry::GetCatalogSet has
+/// no TRIGGER_ENTRY set to look them up in.
 inline std::unordered_map<std::string, std::vector<std::string>>
 read_dbsp_triggers(duckdb::Connection &con) {
   std::unordered_map<std::string, std::vector<std::string>> out;

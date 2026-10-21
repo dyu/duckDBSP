@@ -112,6 +112,12 @@ See [examples/](examples/) for more comprehensive demos.
 
 ## Installation
 
+**Requires DuckDB 2.0.** The extension is built against the DuckDB
+[v2.0.0 LTS release](https://duckdb.org/2026/10/21/announcing-duckdb-200)
+(commit `d54cbbe3`), and loads into the matching `duckdb==2.0.0` Python wheel.
+Databases need storage version `v2.0.0` or higher, because change capture
+uses triggers (see "Storage version" below).
+
 ### Building from Source
 
 ```bash
@@ -119,10 +125,13 @@ See [examples/](examples/) for more comprehensive demos.
 ```
 
 This will:
-1. Download DuckDB source (if not present), pinned by COMMIT
+1. Download DuckDB source (if not present), pinned by COMMIT to v2.0.0
 2. Build the DBSP extension (uses `ccache` and Ninja automatically when
    installed; parallelism capped at `-j 8`)
 3. Output `dbsp.duckdb_extension`
+
+Test binaries are not built by default; `DBSP_BUILD_TESTS=ON ./build.sh` adds
+them under `build/test` (see `docs/TESTING.md`).
 
 **No engine patch.** The engine tree in `duckdb/` is stock, and `build.sh`
 fails loudly if it is not: change capture comes from generated statement

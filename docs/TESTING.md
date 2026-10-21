@@ -19,9 +19,11 @@ ctest -j4                   # full suite, ~1 min
 ./test_planner_frontend     # the big differential suite on its own
 ```
 
-The root build (`./build.sh`) also builds every test binary into `build/test`
-from the same sources and options, so `ctest` from `build/` is equivalent and
-saves a second ~2.6GB DuckDB build when disk is tight.
+`DBSP_BUILD_TESTS=ON ./build.sh` also builds every test binary into
+`build/test` from the same sources and options, so `ctest` from `build/` is
+equivalent and saves a second ~2.6GB DuckDB build when disk is tight. Plain
+`./build.sh` leaves the tests out: with `test/build_test` present, the copy
+under `build/test` is ~3GB of duplicate binaries.
 
 ### `DBSP_TEST_VERIFY_VECTORS=1` — vector verification, suite-wide
 

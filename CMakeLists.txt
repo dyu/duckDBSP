@@ -51,9 +51,14 @@ message(STATUS "DBSP DuckDB Extension v${EXT_VERSION_DBSP}")
 message(STATUS "  DuckDB: ${DUCKDB_SOURCE_DIR}")
 message(STATUS "")
 
-# Add tests
+# Add tests. build.sh turns this off by default: the suite is run from
+# test/build_test, and a second copy of every test binary under build/test
+# costs ~3GB of disk.
+option(DBSP_BUILD_TESTS "Build the test binaries into <build>/test" ON)
 enable_testing()
-add_subdirectory(test)
+if(DBSP_BUILD_TESTS)
+    add_subdirectory(test)
+endif()
 
 # Benchmark (only when the benchmark sources are present)
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/benchmark/benchmark_runner.cpp")

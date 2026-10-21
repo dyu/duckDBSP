@@ -57,12 +57,18 @@ if command -v ninja >/dev/null 2>&1 && [ ! -f "$BUILD_DIR/CMakeCache.txt" ]; the
     CMAKE_EXTRA_ARGS+=("-GNinja")
 fi
 
+# Test binaries are off unless DBSP_BUILD_TESTS=ON: the suite runs from
+# test/build_test, and a copy under build/test costs ~3GB. Passed on every
+# run, so it also overrides whatever an existing CMakeCache.txt holds.
+DBSP_BUILD_TESTS="${DBSP_BUILD_TESTS:-OFF}"
+
 # Configure
 echo "Configuring..."
 DUCKDB_VERSION="$DUCKDB_VERSION" cmake .. \
     -DCMAKE_BUILD_TYPE=Release \
     -DDUCKDB_SOURCE_DIR="$SCRIPT_DIR/duckdb" \
     -DDUCKDB_EXPLICIT_VERSION="$DUCKDB_VERSION" \
+    -DDBSP_BUILD_TESTS="$DBSP_BUILD_TESTS" \
     "${CMAKE_EXTRA_ARGS[@]}"
 
 # Build (parallelism capped at 8 — higher has frozen this machine before)
