@@ -732,13 +732,8 @@ public:
       std::unique_lock<std::shared_mutex> view_lock(view_mutex_);
       mv_reset_mirror_conn();
     }
-    struct ViewCkpt {
-      std::string name;
-      std::string sql; // fingerprint (Finding 1): definition at save time
-      std::vector<std::pair<uint64_t, std::vector<uint8_t>>> nodes;
-      std::vector<uint8_t> sink;
-    };
-    std::vector<ViewCkpt> view_blobs;
+    // ViewBlobs::sql is the fingerprint (Finding 1): definition at save time.
+    std::vector<ViewBlobs> view_blobs;
     // Still-pending lazy-from-table views (Phase 3): their _dbsp_ckpt rows
     // are the ONLY copy of their checkpoint bytes (the stash holds empty
     // placeholders). The write phase keeps these views' existing rows in
@@ -757,7 +752,7 @@ public:
         if (!view->checkpointable()) {
           continue;
         }
-        ViewCkpt ck;
+        ViewBlobs ck;
         ck.name = name;
         auto def_it = view_definitions_.find(name);
         if (def_it != view_definitions_.end()) {
@@ -791,40 +786,10 @@ public:
             preserve_pending.push_back(name);
             continue;
           }
-          bool fetched = false;
-          if (mv_db_ != nullptr) {
-            try {
-              InternalQueryGuard fetch_guard;
-              duckdb::Connection fcon(*mv_db_);
-              auto rows = fcon.Query(
-                  "SELECT kind, node_id, data FROM " +
-                  qualify(pend_it->second.blob_catalog, "_dbsp_ckpt") +
-                  " WHERE name = '" + escape_string(name) +
-                  "' AND kind IN ('node', 'sink')");
-              if (rows->HasError()) {
-                throw std::runtime_error(rows->GetError());
-              }
-              // DuckDB 2.0.0: Collection().GetValue(c, r) materializes every
-              // row on each call, so per-row loops read through one GetRows()
-              // taken up front (here and at every loop below).
-              const auto rows_cells = rows->Collection().GetRows();
-              for (duckdb::idx_t i = 0; i < rows->RowCount(); i++) {
-                const auto blob_str =
-                    duckdb::StringValue::Get(rows_cells.GetValue(2, i));
-                std::vector<uint8_t> blob(blob_str.begin(), blob_str.end());
-                if (rows_cells.GetValue(0, i).ToString() == "node") {
-                  ck.nodes.emplace_back(
-                      static_cast<uint64_t>(
-                          rows_cells.GetValue(1, i).GetValue<int64_t>()),
-                      std::move(blob));
-                } else {
-                  ck.sink = std::move(blob);
-                }
-              }
-              fetched = true;
-            } catch (...) {
-            }
-          }
+          const bool fetched =
+              mv_db_ != nullptr &&
+              CheckpointStore::read_view_blobs(
+                  *mv_db_, pend_it->second.blob_catalog, name, ck);
           if (!fetched) {
             continue; // not checkpointed this save: replays at next load
           }
@@ -1572,10 +1537,7 @@ public:
 
   // Fetch a still-placeholder stash's node/sink blobs from _dbsp_ckpt.
   // No-op (true) when the stash already holds bytes or there is no mv db.
-  // Per-view `name =` probes beat one big IN-list query here: measured at
-  // the 60emp reattach, 141 filtered probes cost 1.3s total while a
-  // 110-name IN scan cost 2.0s alone (the equality filter prunes row
-  // groups before the blob column is touched; the IN filter does not).
+  // One per-view probe per call (CheckpointStore::read_view_blobs says why).
   // Thread-safe by construction — touches only `pv` (per-view state) on a
   // fresh internal connection — so the batched pre-pass realize calls it
   // from worker threads, which also overlaps the fetch I/O per view.
@@ -1583,33 +1545,20 @@ public:
     if (!pv.lazy_from_table || mv_db_ == nullptr) {
       return true;
     }
-    try {
-      DbspScopeTimer t_fetch("ckpt_fetch", view_name);
-      InternalQueryGuard fetch_guard;
-      duckdb::Connection fcon(*mv_db_);
-      auto rows = fcon.Query("SELECT kind, node_id, data FROM " +
-                             qualify(pv.blob_catalog, "_dbsp_ckpt") +
-                             " WHERE name = '" + escape_string(view_name) +
-                             "' AND kind IN ('node', 'sink')");
-      if (rows->HasError()) {
-        throw std::runtime_error(rows->GetError());
-      }
-      const auto rows_cells = rows->Collection().GetRows();
-      for (duckdb::idx_t i = 0; i < rows->RowCount(); i++) {
-        const auto blob_str = duckdb::StringValue::Get(rows_cells.GetValue(2, i));
-        std::vector<uint8_t> blob(blob_str.begin(), blob_str.end());
-        if (rows_cells.GetValue(0, i).ToString() == "node") {
-          pv.nodes[static_cast<uint64_t>(
-              rows_cells.GetValue(1, i).GetValue<int64_t>())] = std::move(blob);
-        } else {
-          pv.sink = std::move(blob);
-        }
-      }
-      pv.lazy_from_table = false;
-      return true;
-    } catch (...) {
+    DbspScopeTimer t_fetch("ckpt_fetch", view_name);
+    ViewBlobs fetched;
+    if (!CheckpointStore::read_view_blobs(*mv_db_, pv.blob_catalog, view_name,
+                                          fetched)) {
       return false;
     }
+    for (auto &[node_id, blob] : fetched.nodes) {
+      pv.nodes[node_id] = std::move(blob);
+    }
+    if (!fetched.sink.empty()) {
+      pv.sink = std::move(fetched.sink);
+    }
+    pv.lazy_from_table = false;
+    return true;
   }
 
   // Batched realize for propagate_changes_multi's pre-pass: the per-view
@@ -3421,18 +3370,7 @@ public:
   // comment): must NOT run on `context` directly.
   void erase_persisted_checkpoint_rows(duckdb::ClientContext &context,
                                        const std::string &name) {
-    try {
-      // WHITELISTED. DDL/DML over DBSP's OWN bookkeeping table, never the
-      // user's, so it never needs to see their uncommitted catalog — the
-      // hazard the sweep's DDL hit.
-      InternalConnection con_owner(context, InternalReadPolicy::AllowedInTxn,
-                                    "erase_persisted_checkpoint_rows");
-      auto &con = *con_owner;
-      con.Query("DELETE FROM _dbsp_ckpt WHERE name = '" + name + "'");
-      // Ignore errors (including "table does not exist") — persistence is
-      // best-effort throughout this file.
-    } catch (...) {
-    }
+    CheckpointStore::erase_view_rows(context, name);
   }
 
   // Record an INSERT. `context` enables lazy-baseline materialization

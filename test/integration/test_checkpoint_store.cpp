@@ -159,3 +159,50 @@ TEST_CASE("checkpoint store: attached catalog reads its own tables",
   REQUIRE(CheckpointStore::read(ctx(db), "", false).status ==
           CheckpointReadStatus::NoCheckpoint);
 }
+
+TEST_CASE("checkpoint store: read_view_blobs matches the eager image",
+          "[integration][checkpoint][checkpoint_store]") {
+  DuckDBTestHarness db;
+  setupSaved(db);
+  const auto image = CheckpointStore::read(ctx(db), "", false).image;
+  dbsp_native::ViewBlobs b;
+  REQUIRE(CheckpointStore::read_view_blobs(
+      duckdb::DatabaseInstance::GetDatabase(ctx(db)), "", "va", b));
+  REQUIRE(b.sink == image.sinks.at("va"));
+  const auto &nodes = image.nodes.at("va");
+  REQUIRE(b.nodes.size() == nodes.size());
+  for (const auto &[id, bytes] : b.nodes) {
+    REQUIRE(nodes.count(id) == 1);
+    REQUIRE(bytes == nodes.at(id));
+  }
+}
+
+TEST_CASE("checkpoint store: read_view_blobs of an unknown view is empty, "
+          "not an error",
+          "[integration][checkpoint][checkpoint_store]") {
+  DuckDBTestHarness db;
+  setupSaved(db);
+  dbsp_native::ViewBlobs b;
+  REQUIRE(CheckpointStore::read_view_blobs(
+      duckdb::DatabaseInstance::GetDatabase(ctx(db)), "", "nope", b));
+  REQUIRE(b.nodes.empty());
+  REQUIRE(b.sink.empty());
+}
+
+TEST_CASE("checkpoint store: erase_view_rows removes only that view",
+          "[integration][checkpoint][checkpoint_store]") {
+  DuckDBTestHarness db;
+  setupSaved(db);
+  db.exec("SELECT * FROM dbsp_create_view('vb', "
+          "'SELECT grp, COUNT(*) AS n FROM ta GROUP BY grp')");
+  REQUIRE_FALSE(db.query("SELECT * FROM dbsp_save()")->HasError());
+  CheckpointStore::erase_view_rows(ctx(db), "va");
+  auto count = [&db](const std::string &v) {
+    return db.query("SELECT count(*) FROM _dbsp_ckpt WHERE name = '" + v + "'")
+        ->Collection()
+        .GetValue(0, 0)
+        .GetValue<int64_t>();
+  };
+  REQUIRE(count("va") == 0);
+  REQUIRE(count("vb") > 0);
+}

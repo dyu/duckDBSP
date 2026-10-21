@@ -265,6 +265,64 @@ public:
     }
   }
 
+  // One view's node + sink rows from <catalog>._dbsp_ckpt, read on the
+  // private instance `db`. True with whatever rows exist (possibly none);
+  // false on any error. Per-view `name =` probes beat one big IN-list query:
+  // measured at the 60emp reattach, 141 filtered probes cost 1.3s total
+  // while a 110-name IN scan cost 2.0s alone (the equality filter prunes
+  // row groups before the blob column is touched; the IN filter does not).
+  // Touches only `out`, on a fresh connection, so callers may run it from
+  // worker threads.
+  static bool read_view_blobs(duckdb::DatabaseInstance &db,
+                              const std::string &catalog,
+                              const std::string &view, ViewBlobs &out) {
+    try {
+      InternalQueryGuard fetch_guard;
+      duckdb::Connection fcon(db);
+      auto rows = fcon.Query("SELECT kind, node_id, data FROM " +
+                             qualify(catalog, "_dbsp_ckpt") +
+                             " WHERE name = '" + escape_sql_literal(view) +
+                             "' AND kind IN ('node', 'sink')");
+      if (rows->HasError()) {
+        return false;
+      }
+      const auto rows_cells = rows->Collection().GetRows();
+      for (duckdb::idx_t i = 0; i < rows->RowCount(); i++) {
+        const auto blob_str =
+            duckdb::StringValue::Get(rows_cells.GetValue(2, i));
+        std::vector<uint8_t> blob(blob_str.begin(), blob_str.end());
+        if (rows_cells.GetValue(0, i).ToString() == "node") {
+          out.nodes.emplace_back(
+              static_cast<uint64_t>(
+                  rows_cells.GetValue(1, i).GetValue<int64_t>()),
+              std::move(blob));
+        } else {
+          out.sink = std::move(blob);
+        }
+      }
+      return true;
+    } catch (...) {
+      return false;
+    }
+  }
+
+  // Best-effort: delete a view's rows from the default catalog's
+  // _dbsp_ckpt. Ignores every error (including "table does not exist") —
+  // persistence is best-effort here. WHITELISTED: DML over DBSP's OWN
+  // bookkeeping table, never the user's, so it never needs to see their
+  // uncommitted catalog.
+  static void erase_view_rows(duckdb::ClientContext &context,
+                              const std::string &view) {
+    try {
+      InternalConnection con_owner(context, InternalReadPolicy::AllowedInTxn,
+                                   "erase_persisted_checkpoint_rows");
+      auto &con = *con_owner;
+      con.Query("DELETE FROM _dbsp_ckpt WHERE name = '" +
+                escape_sql_literal(view) + "'");
+    } catch (...) {
+    }
+  }
+
 private:
   // The live watermark of `table` on `con`, or nullopt when the query
   // fails (the table vanished or cannot be read). The alias must not be
