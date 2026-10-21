@@ -114,4 +114,23 @@ inline std::string quote_table_key(const std::string &key) {
   return out;
 }
 
+// Qualify a table name with an optional catalog prefix for cross-catalog SQL.
+// qualify("m", "_dbsp_views") -> "\"m\".\"_dbsp_views\""
+// qualify("",  "_dbsp_views") -> "\"_dbsp_views\""
+inline std::string qualify(const std::string &cat, const std::string &tbl) {
+  return cat.empty() ? ("\"" + tbl + "\"") : ("\"" + cat + "\".\"" + tbl + "\"");
+}
+
+// Body of a single-quoted SQL string literal: doubles every quote.
+inline std::string escape_sql_literal(const std::string &s) {
+  std::string result;
+  for (char c : s) {
+    if (c == '\'')
+      result += "''";
+    else
+      result += c;
+  }
+  return result;
+}
+
 } // namespace dbsp_native

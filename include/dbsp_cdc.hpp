@@ -9,6 +9,7 @@
 #include "dbsp_qualified_name.hpp"
 #include "dbsp_trigger_capability.hpp"
 #include "dbsp_internal_connection.hpp"
+#include "dbsp_checkpoint_store.hpp"
 
 #include "duckdb.hpp"
 #include "duckdb/catalog/catalog.hpp"
@@ -303,13 +304,6 @@ inline bool is_valid_identifier(const std::string &name) {
   std::string error_msg;
   ErrorCode error_code;
   return validate_identifier(name, error_msg, error_code);
-}
-
-// Qualify a table name with an optional catalog prefix for cross-catalog SQL.
-// qualify("m", "_dbsp_views") -> "\"m\".\"_dbsp_views\""
-// qualify("",  "_dbsp_views") -> "\"_dbsp_views\""
-inline std::string qualify(const std::string &cat, const std::string &tbl) {
-  return cat.empty() ? ("\"" + tbl + "\"") : ("\"" + cat + "\".\"" + tbl + "\"");
 }
 
 // Validate and canonicalize file path to prevent path traversal
@@ -1319,192 +1313,33 @@ public:
     }
   }
 
-  // Load-side: true when a checkpoint exists and every watermark matches
-  // the live tables. Fills `views` with per-view node blobs and sink blob.
-  struct CkptData {
-    std::unordered_map<std::string,
-                       std::unordered_map<uint64_t, std::vector<uint8_t>>>
-        nodes;
-    std::unordered_map<std::string, std::vector<uint8_t>> sinks;
-    // Per-view SQL fingerprint at save time (Finding 1) — compared against
-    // the SQL about to be used to cold-create the view; a mismatch means
-    // the view's definition changed since this checkpoint was written, so
-    // the fast path is declined for that view alone.
-    std::unordered_map<std::string, std::string> sql_fingerprints;
-    // View-arrangement sidecar identity of this checkpoint (the
-    // kind='saveid' row; design note at save_checkpoint's sidecar loop):
-    // sidecar files stamped with exactly this (seq, id) pair were written
-    // or re-stamped by the save that wrote these view blobs. An empty id
-    // (pre-feature checkpoint) just declines view-sidecar adoption.
-    int64_t view_arr_seq = -1;
-    std::string view_arr_id;
-    // Verified per-source watermarks (COUNT, bit_xor(hash) as VARCHAR) —
-    // seeds for lazy (deferred) baselines on the load fast path (D3c).
-    // Only tables whose live content MATCHED the save-time watermark
-    // appear here; changed tables land in stale_tables instead.
-    std::unordered_map<std::string, std::pair<int64_t, std::string>>
-        watermarks;
-    // Tables whose live content diverged from the save-time watermark
-    // (crash lost an edit, out-of-band write). O(delta) recovery
-    // increment A: a mismatch no longer discards the checkpoint — views
-    // whose source closure touches a stale table cold-replay, everything
-    // else restores from the checkpoint.
-    std::unordered_set<std::string> stale_tables;
-    // Phase 3 (reattach): when true, nodes/sinks hold EMPTY placeholder
-    // blobs — the bytes stay in _dbsp_ckpt and are fetched per view at
-    // realize time. Set only for disk-backed (mv-table) databases, where
-    // operator state runs to GBs and eager blob reads dominated reattach.
-    bool lazy_blobs = false;
-    std::string blob_catalog;
-  };
+  // Load-side: true when a usable checkpoint exists. The store reads the
+  // rows and each source's saved and live watermarks; this decides which
+  // tables are stale (changed or vanished since the save) and which
+  // verified watermarks seed deferred baselines. A storage error is
+  // treated like no checkpoint: every view replays.
+  using CkptData = CheckpointImage;
 
   bool checkpoint_valid(duckdb::ClientContext &context, CkptData &out,
                         const std::string &catalog = "") {
-    // WHITELISTED. Restore-time verification: it compares the SAVED watermark
-    // against live COMMITTED storage, which is the state the saved circuit
-    // corresponds to. Reached from load_from_duck_table, which can run inside
-    // an open user transaction.
-    const std::string ckpt_tbl = qualify(catalog, "_dbsp_ckpt");
-    const std::string ckpt_meta_tbl = qualify(catalog, "_dbsp_ckpt_meta");
-    const std::string ckpt_ver_tbl = qualify(catalog, "_dbsp_ckpt_version");
-    try {
-      InternalConnection con_owner(
-          context, InternalReadPolicy::AllowedInTxn,
-          "checkpoint_valid (restore watermarks)");
-      auto &con = *con_owner;
-      // Scope the existence check to the right catalog when one is given.
-      std::string exists_sql;
-      if (catalog.empty()) {
-        exists_sql = "SELECT 1 FROM information_schema.tables WHERE table_name = '_dbsp_ckpt'";
-      } else {
-        exists_sql = "SELECT 1 FROM information_schema.tables WHERE table_catalog = '" +
-                     catalog + "' AND table_name = '_dbsp_ckpt'";
-      }
-      auto exists = con.Query(exists_sql);
-      if (exists->HasError() || exists->RowCount() == 0) {
-        return false;
-      }
-      // Format-version gate: a checkpoint saved before the version table
-      // existed (or under a different blob layout) must be treated as
-      // absent, never fed to node restore_state — see
-      // dbsp_checkpoint.hpp kDbspCkptFormatVersion.
-      std::string ver_exists_sql;
-      if (catalog.empty()) {
-        ver_exists_sql = "SELECT 1 FROM information_schema.tables WHERE "
-                         "table_name = '_dbsp_ckpt_version'";
-      } else {
-        ver_exists_sql = "SELECT 1 FROM information_schema.tables WHERE "
-                         "table_catalog = '" +
-                         catalog + "' AND table_name = '_dbsp_ckpt_version'";
-      }
-      auto ver_exists = con.Query(ver_exists_sql);
-      if (ver_exists->HasError() || ver_exists->RowCount() == 0) {
-        return false; // pre-bump checkpoint: no version table at all
-      }
-      auto ver = con.Query("SELECT version FROM " + ckpt_ver_tbl);
-      if (ver->HasError() || ver->RowCount() != 1 ||
-          ver->Collection().GetValue(0, 0).GetValue<int64_t>() !=
-              dbsp_native::kDbspCkptFormatVersion) {
-        return false; // version mismatch: discard, rebuild by replay
-      }
-      auto meta = con.Query(
-          "SELECT table_name, row_count, row_hash FROM " + ckpt_meta_tbl);
-      if (meta->HasError()) {
-        return false;
-      }
-      const auto meta_cells = meta->Collection().GetRows();
-      for (duckdb::idx_t i = 0; i < meta->RowCount(); i++) {
-        const std::string t = meta_cells.GetValue(0, i).ToString();
-        // Shadow-proof alias — see save_checkpoint's watermark loop.
-        auto live = con.Query("SELECT COUNT(*), CAST(bit_xor(hash("
-                              "__dbsp_wm_row)) AS VARCHAR) FROM " +
-                              quote_table_key(t) + " __dbsp_wm_row");
-        if (live->HasError() || live->RowCount() != 1 ||
-            live->Collection().GetValue(0, 0) != meta_cells.GetValue(1, i) ||
-            live->Collection().GetValue(1, 0).ToString() !=
-                meta_cells.GetValue(2, i).ToString()) {
-          // O(delta) recovery increment A: the table changed (or vanished)
-          // since the save. Don't discard the whole checkpoint — record
-          // the table as stale; the loader cold-replays only views whose
-          // source closure touches it.
-          out.stale_tables.insert(t);
-          continue;
-        }
-        out.watermarks[t] = {meta_cells.GetValue(1, i).GetValue<int64_t>(),
-                             meta_cells.GetValue(2, i).ToString()};
-      }
-      // View-arrangement sidecar identity (kind='saveid'; design note at
-      // save_checkpoint's sidecar loop). A missing row — pre-feature
-      // checkpoint — leaves the id empty and adoption simply declines.
-      auto sid = con.Query("SELECT node_id, data FROM " + ckpt_tbl +
-                           " WHERE kind = 'saveid'");
-      if (!sid->HasError() && sid->RowCount() == 1) {
-        out.view_arr_seq = sid->Collection().GetValue(0, 0).GetValue<int64_t>();
-        out.view_arr_id = duckdb::StringValue::Get(sid->Collection().GetValue(1, 0));
-      }
-      // Phase 3 (reattach): on a disk-backed database (mv tables present,
-      // marked earlier in load_from_duck_table) operator blobs run to GBs
-      // — read only the CATALOG of blobs here (names/ids, no bytes) and
-      // fetch per view at realize time. SQL fingerprints are tiny and
-      // always eager.
-      out.lazy_blobs = mv_tables_enabled_.load();
-      out.blob_catalog = catalog;
-      if (out.lazy_blobs) {
-        auto rows = con.Query("SELECT kind, name, node_id FROM " + ckpt_tbl +
-                              " WHERE kind IN ('node', 'sink')");
-        if (rows->HasError()) {
-          return false;
-        }
-        const auto rows_cells = rows->Collection().GetRows();
-        for (duckdb::idx_t i = 0; i < rows->RowCount(); i++) {
-          const std::string kind = rows_cells.GetValue(0, i).ToString();
-          const std::string name = rows_cells.GetValue(1, i).ToString();
-          const auto node_id =
-              static_cast<uint64_t>(rows_cells.GetValue(2, i).GetValue<int64_t>());
-          if (kind == "node") {
-            out.nodes[name][node_id] = {};
-          } else {
-            out.sinks[name] = {};
-          }
-        }
-        auto fps = con.Query("SELECT name, data FROM " + ckpt_tbl +
-                             " WHERE kind = 'sql'");
-        if (fps->HasError()) {
-          return false;
-        }
-        const auto fps_cells = fps->Collection().GetRows();
-        for (duckdb::idx_t i = 0; i < fps->RowCount(); i++) {
-          out.sql_fingerprints[fps_cells.GetValue(0, i).ToString()] =
-              duckdb::StringValue::Get(fps_cells.GetValue(1, i));
-        }
-        return !out.sinks.empty();
-      }
-      auto rows = con.Query("SELECT kind, name, node_id, data FROM " + ckpt_tbl);
-      if (rows->HasError()) {
-        return false;
-      }
-      const auto rows_cells = rows->Collection().GetRows();
-      for (duckdb::idx_t i = 0; i < rows->RowCount(); i++) {
-        const std::string kind = rows_cells.GetValue(0, i).ToString();
-        const std::string name = rows_cells.GetValue(1, i).ToString();
-        const auto node_id =
-            static_cast<uint64_t>(rows_cells.GetValue(2, i).GetValue<int64_t>());
-        const auto blob_str =
-            duckdb::StringValue::Get(rows_cells.GetValue(3, i));
-        std::vector<uint8_t> blob(blob_str.begin(), blob_str.end());
-        if (kind == "node") {
-          out.nodes[name][node_id] = std::move(blob);
-        } else if (kind == "sink") {
-          out.sinks[name] = std::move(blob);
-        } else if (kind == "sql") {
-          out.sql_fingerprints[name] =
-              std::string(blob.begin(), blob.end());
-        }
-      }
-      return !out.sinks.empty();
-    } catch (...) {
+    auto read =
+        CheckpointStore::read(context, catalog, mv_tables_enabled_.load());
+    if (read.status != CheckpointReadStatus::Usable) {
       return false;
     }
+    out = std::move(read.image);
+    for (const auto &check : read.watermarks) {
+      if (!check.live || !(*check.live == check.saved)) {
+        // O(delta) recovery increment A: the table changed (or vanished)
+        // since the save. Don't discard the whole checkpoint — record the
+        // table as stale; the loader cold-replays only views whose source
+        // closure touches it.
+        out.stale_tables.insert(check.table);
+        continue;
+      }
+      out.watermarks[check.table] = {check.saved.count, check.saved.hash};
+    }
+    return true;
   }
 
   // Inject checkpointed state into a cold-created view. Must be called
@@ -7283,14 +7118,7 @@ private:
 
   // String escaping utilities
   std::string escape_string(const std::string &s) {
-    std::string result;
-    for (char c : s) {
-      if (c == '\'')
-        result += "''";
-      else
-        result += c;
-    }
-    return result;
+    return escape_sql_literal(s);
   }
 
   // Format runtime error with context
