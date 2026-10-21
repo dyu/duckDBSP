@@ -68,6 +68,10 @@ inline std::atomic<size_t> g_lazy_view_decodes{0};
 // realize_pending_view_locked (its callers hold struct_mutex_ shared, so
 // the try-lock always fails and the message goes to stderr only).
 inline std::atomic<size_t> g_lazy_realize_failures{0};
+// Test-only fault injection: when set, the next save_checkpoint() rolls back
+// at the point it would COMMIT and reports a commit failure (then the flag
+// clears). Lets tests pin that a failed save promotes nothing.
+inline std::atomic<bool> g_fail_next_ckpt_commit{false};
 
 // View-arrangement sidecars (design note at save_checkpoint's sidecar
 // loop): test-observable counters, same g_* convention as above.
@@ -1107,7 +1111,19 @@ public:
                      dbsp_wm_nohash);
       }
       }
-      con.Query("COMMIT");
+      if (dbsp_native::g_fail_next_ckpt_commit.exchange(false)) {
+        con.Query("ROLLBACK");
+        last_error_ = "checkpoint commit failed: injected by test";
+        return false;
+      }
+      // A COMMIT that fails leaves nothing written, so it must return before
+      // anything below records this save as done.
+      auto committed = con.Query("COMMIT");
+      if (!committed || committed->HasError()) {
+        last_error_ = "checkpoint commit failed: " +
+                      (committed ? committed->GetError() : "null result");
+        return false;
+      }
       last_ckpt_saved_count_ = view_blobs.size() + preserve_pending.size();
       mark_saved();
       // Committed: these generations are now what _dbsp_ckpt holds, so the

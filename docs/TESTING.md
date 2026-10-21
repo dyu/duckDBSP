@@ -241,6 +241,32 @@ asserts via counters that no scan ran — a fallback would still produce the
 right view, so the correctness check alone could not fail on a silent
 regression.
 
+### `checkpoint_invariants` — what moving checkpoint code must keep
+
+`test_checkpoint_invariants` (`test/integration/test_checkpoint_invariants.cpp`,
+3 cases) pins the rules the checkpoint-store refactor
+(`docs/superpowers/specs/2026-09-26-cdc-checkpoint-persistence-owner-design.md`)
+lists as its risks:
+- **Selective replay.** A table changed since the save cold-replays only the
+  views whose source closure reaches it, including views stacked on them.
+  Every other view restores from the checkpoint.
+- **Watermark cache.** A save that reuses cached source watermarks still
+  records current content: "save, edit, save" restores everything, and an
+  edit after a cached save is still caught.
+- **Failed save.** A save that fails at COMMIT records nothing as saved.
+
+The failed save is forced by the test-only `g_fail_next_ckpt_commit` flag. A
+view counts as restored from the checkpoint when it is still pending under
+lazy restore.
+
+Proof it bites, run 2026-10-21. Each rule was broken in turn, and its case
+went red:
+- Dropping the view-on-view part of the stale closure failed selective replay.
+- Ignoring the dirty flag on cached watermarks failed both cases that save
+  after an edit.
+- Promoting saved generations before COMMIT failed the failed-save case with
+  wrong view values, which is the silent mis-restore it exists to catch.
+
 ### Python scripts (`test/python/`)
 
 `test/python/*.py` are standalone probe scripts, **not wired into ctest** —

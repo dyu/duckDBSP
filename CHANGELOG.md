@@ -1,5 +1,29 @@
 # Changelog
 
+## Checkpoint invariants pinned before the checkpoint-store refactor — 2026-10-21
+
+**A save whose COMMIT failed would still have recorded its views as saved.**
+`save_checkpoint` ran `COMMIT` without checking the result, then promoted
+every view's saved generation. The next save would have "preserved" those
+views' rows still in `_dbsp_ckpt`, which were written before the views last
+changed, beside fresh watermarks. The restore would then come back silently
+wrong. The COMMIT result is now checked, and a failure returns before
+anything is promoted.
+
+New ctest target `checkpoint_invariants` pins three rules the refactor spec
+(`docs/superpowers/specs/2026-09-26-cdc-checkpoint-persistence-owner-design.md`)
+names as risks:
+- **Selective replay** of only a changed table's view closure. This was
+  previously covered only by `test_partial_ckpt.py`, outside ctest.
+- **Watermark cache.** "Save, edit, save" restores everything, and an edit
+  after a cached save is still caught.
+- **Failed save.** A COMMIT failure, forced through the test-only
+  `g_fail_next_ckpt_commit` flag, promotes nothing.
+
+Breaking each rule on purpose turned its case red (see `docs/TESTING.md`).
+
+46/46 ctest green.
+
 ## Engine: DuckDB v2.0.0 LTS — 2026-10-21
 
 **The engine moves from the 2.0 alpha (`v2.0.0-alpha39998`, `a00803f7`) to
