@@ -48,7 +48,8 @@
 // CDCManager::create_view falls back to the bespoke parser transparently.
 //
 // Caller contract: PlanTranslator::translate issues queries on an internal
-// connection, so the caller must hold an InternalQueryGuard (dbsp_cdc.hpp)
+// connection, so the caller must hold an InternalQueryGuard
+// (dbsp_internal_connection.hpp)
 // to keep transaction-commit hooks from recursing into CDCManager.
 
 #pragma once
@@ -56,7 +57,7 @@
 #include "dbsp_circuit_views.hpp"
 #include "dbsp_distinct_on.hpp"
 #include "dbsp_errors.hpp"
-#include "dbsp_instance_registry.hpp"
+#include "dbsp_internal_connection.hpp"
 #include "dbsp_checkpoint.hpp"
 #include "dbsp_qualified_name.hpp"
 #include "dbsp_trigger_capability.hpp"
@@ -111,7 +112,7 @@ namespace dbsp_native {
 // Keeps the internal connection and the extracted plan alive for as long as
 // any node lambda references bound expressions or the client context.
 struct PlanKeepAlive {
-  std::unique_ptr<duckdb::Connection> connection;
+  RetainedInternalConnection connection;
   std::unique_ptr<duckdb::LogicalOperator> plan;
   // Expressions the IR optimizer rewrote (e.g. right-side join pushdown
   // shifts column indices): node lambdas reference them, so they must live
@@ -122,16 +123,7 @@ struct PlanKeepAlive {
   PlanKeepAlive(const PlanKeepAlive &) = delete;
   PlanKeepAlive &operator=(const PlanKeepAlive &) = delete;
 
-  ~PlanKeepAlive() {
-    if (connection && connection->context) {
-      // Destroy the connection first, then unregister: ~Connection fires
-      // OnConnectionClosed, which must still classify this context as
-      // internal or it would count it as a departing user connection.
-      auto *ctx = connection->context.get();
-      connection.reset();
-      get_instance_registry().unregister_internal(ctx);
-    }
-  }
+  ~PlanKeepAlive() { connection.reset(); }
 };
 
 // Row-at-a-time adapter over ExpressionExecutor: builds a 1-row DataChunk

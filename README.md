@@ -78,7 +78,7 @@ SELECT * FROM dbsp_auto_sync(true);
 -- Create view using table function API
 SELECT * FROM dbsp_create_view('customer_totals',
     'SELECT customer, SUM(amount) FROM orders GROUP BY customer');
-    
+
 -- Query using table function
 SELECT * FROM dbsp_query('customer_totals');
 ```
@@ -476,6 +476,7 @@ duckDBSP/
 │   ├── dbsp_circuit.hpp         # Dataflow graph
 │   ├── dbsp_plan_translator.hpp # Planner frontend (circuit translation)
 │   ├── dbsp_cdc.hpp             # CDC manager + shared arrangements
+│   ├── dbsp_internal_connection.hpp # Scoped/retained internal connections
 │   ├── dbsp_duckdb_types.hpp    # Native DuckDB type integration
 │   └── dbsp_context_state.hpp   # Transaction hooks (auto-CDC)
 ├── src/                         # Extension source
@@ -524,13 +525,11 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 ### Internal connection ownership
 
-`InternalConnection` in `dbsp_cdc.hpp` binds the recursion guard to the
-connection lifetime and checks the caller's explicit read policy before opening
-it. The guard survives connection destruction, including context teardown.
-Directly adjacent policy/guard/connection sites use this owner. Other legacy
-connection sites and policy/site forwarding remain; this is not blanket coverage
-of all internal connections. Checks preceding catch boundaries are retained.
-The strict switch still cannot detect a user transaction already cleared before
-the commit hook. The `[internal_connection]` canaries cover teardown suppression,
-construction-failure unwinding, and explicit allowed/forbidden transaction policy;
-run them both normally and with `DBSP_STRICT_INTERNAL_QUERY=1` in a fresh process.
+`dbsp_internal_connection.hpp` owns the scoped and retained internal connection
+APIs. `InternalConnection` keeps hook suppression active through connection and
+context teardown. `RetainedInternalConnection` keeps planner context
+registration for the plan lifetime without carrying a thread-local guard; the
+caller guards planner queries, and reset guards teardown. Persistence loading,
+planner binding, sidecar watermarking, and the transaction-manager-only probe
+use the owners with explicit policies. Run `[internal_connection]` canaries
+normally and with `DBSP_STRICT_INTERNAL_QUERY=1` in separate processes.

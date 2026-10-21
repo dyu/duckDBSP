@@ -8,6 +8,7 @@
 #include "dbsp_plan_translator.hpp"
 #include "dbsp_qualified_name.hpp"
 #include "dbsp_trigger_capability.hpp"
+#include "dbsp_internal_connection.hpp"
 
 #include "duckdb.hpp"
 #include "duckdb/catalog/catalog.hpp"
@@ -114,45 +115,6 @@ struct DbspScopeTimer {
   }
 };
 
-// Marks queries DBSP issues on internal helper connections. Transaction hooks
-// must not recurse into CDCManager for these (deadlock: the issuing thread may
-// already hold struct_mutex_, which is not recursive).
-inline thread_local int internal_query_depth = 0;
-
-struct InternalQueryGuard {
-  InternalQueryGuard() { ++internal_query_depth; }
-  ~InternalQueryGuard() { --internal_query_depth; }
-  InternalQueryGuard(const InternalQueryGuard &) = delete;
-  InternalQueryGuard &operator=(const InternalQueryGuard &) = delete;
-};
-
-// Own the recursion guard before opening the connection; reverse member
-// destruction keeps hooks suppressed through Connection/ClientContext teardown.
-// Policy remains explicit: callers sharing a scan helper can have different
-// transaction contracts, and the commit hook has already lost that context.
-class InternalConnection {
-public:
-  InternalConnection(duckdb::ClientContext &context, InternalReadPolicy policy,
-                     const char *site)
-      : connection_(checked_database(context, policy, site)) {}
-
-  duckdb::Connection &operator*() { return connection_; }
-  duckdb::Connection *operator->() { return &connection_; }
-  InternalConnection(const InternalConnection &) = delete;
-  InternalConnection &operator=(const InternalConnection &) = delete;
-
-private:
-  static duckdb::DatabaseInstance &checked_database(
-      duckdb::ClientContext &context, InternalReadPolicy policy,
-      const char *site) {
-    enforce_internal_read_policy(context, policy, site);
-    return duckdb::DatabaseInstance::GetDatabase(context);
-  }
-
-  InternalQueryGuard guard_;
-  duckdb::Connection connection_;
-};
-
 // ---- instance transaction watermark ---------------------------------------
 //
 // A table is seeded from COMMITTED storage. Another connection holding a
@@ -229,9 +191,11 @@ inline uint64_t probe_new_start_timestamp(duckdb::ClientContext &context,
   if (!tm.IsDuckTransactionManager()) {
     return 0;
   }
-  InternalQueryGuard guard;
   try {
-    duckdb::Connection probe(duckdb::DatabaseInstance::GetDatabase(context));
+    InternalConnection probe_owner(
+        context, InternalReadPolicy::AllowedInTxn,
+        "probe_new_start_timestamp (transaction-manager counter only)");
+    auto &probe = *probe_owner;
     probe.BeginTransaction();
     const uint64_t start = static_cast<uint64_t>(
         duckdb::DuckTransaction::Get(*probe.context, attached).start_time);
@@ -2097,8 +2061,9 @@ public:
     };
     std::vector<LoadRow> rows;
     try {
-      InternalQueryGuard guard;
-      duckdb::Connection con(duckdb::DatabaseInstance::GetDatabase(context));
+      InternalConnection con_owner(context, InternalReadPolicy::AllowedInTxn,
+                                    "load_from_duck_table");
+      auto &con = *con_owner;
       // Scope the existence check to the right catalog when one is given.
       std::string exists_sql;
       if (catalog.empty()) {
@@ -2174,25 +2139,26 @@ public:
     // opposite of what dbsp_mv_tables(false) documents.
     if (!mv_tables_user_disabled_.load()) {
       try {
-      InternalQueryGuard meta_guard;
-      duckdb::Connection meta_con(
-          duckdb::DatabaseInstance::GetDatabase(context));
-      auto meta = meta_con.Query("SELECT view_name FROM " +
-                                 qualify(catalog, "__dbsp_mv_meta"));
-      if (!meta->HasError()) {
-        std::unique_lock<std::shared_mutex> vl(view_mutex_);
-        size_t marked = 0;
-        while (auto chunk = meta->Fetch()) {
-          for (duckdb::idx_t r = 0; r < chunk->size(); r++) {
-            mv_table_backed_.insert(chunk->GetValue(0, r).ToString());
-            marked++;
+        InternalConnection meta_con_owner(
+            context, InternalReadPolicy::AllowedInTxn,
+            "load_from_duck_table (__dbsp_mv_meta metadata read)");
+        auto &meta_con = *meta_con_owner;
+        auto meta = meta_con.Query("SELECT view_name FROM " +
+                                   qualify(catalog, "__dbsp_mv_meta"));
+        if (!meta->HasError()) {
+          std::unique_lock<std::shared_mutex> vl(view_mutex_);
+          size_t marked = 0;
+          while (auto chunk = meta->Fetch()) {
+            for (duckdb::idx_t r = 0; r < chunk->size(); r++) {
+              mv_table_backed_.insert(chunk->GetValue(0, r).ToString());
+              marked++;
+            }
+          }
+          if (marked > 0) {
+            mv_db_ = &duckdb::DatabaseInstance::GetDatabase(context);
+            mv_tables_enabled_ = true;
           }
         }
-        if (marked > 0) {
-          mv_db_ = &duckdb::DatabaseInstance::GetDatabase(context);
-          mv_tables_enabled_ = true;
-        }
-      }
       } catch (...) {
         // no meta table = not a disk-backed database; nothing to mark
       }
@@ -3032,13 +2998,6 @@ public:
   // must materialize first (D3c).
   void register_arrangements(duckdb::ClientContext &context,
                              PlannedCircuitView &pview, bool cold) {
-    // WHITELISTED for the sidecar watermark read below. It stamps a shared
-    // arrangement's on-disk index with the COMMITTED state that arrangement
-    // was built from, and it is compared against committed storage when the
-    // sidecar is adopted. Reached from create_view, which can run inside an
-    // open user transaction.
-    enforce_internal_read_policy(context, InternalReadPolicy::AllowedInTxn,
-                                 "register_arrangements (sidecar watermark)");
     for (const auto &req : pview.arrangement_requests()) {
       const bool source_is_table = tracked_tables_.count(req.table) > 0;
       const bool source_is_view = views_.count(req.table) > 0;
@@ -3207,9 +3166,13 @@ public:
               !arr->flat.mapped()) {
             try {
               DbspScopeTimer t_early("arr_sidecar_early", req.table);
-              InternalQueryGuard iguard;
-              duckdb::Connection con(
-                  duckdb::DatabaseInstance::GetDatabase(context));
+              // AllowedInTxn: stamp the committed state used to build this
+              // index; adoption compares the same fingerprint to committed
+              // storage. This path runs inside create_view's user transaction.
+              InternalConnection con_owner(
+                  context, InternalReadPolicy::AllowedInTxn,
+                  "register_arrangements (sidecar watermark)");
+              auto &con = *con_owner;
               auto wm = con.Query(
                   "SELECT COUNT(*), CAST(bit_xor(hash(__dbsp_wm_row)) AS "
                   "VARCHAR) FROM " +

@@ -10,11 +10,22 @@
 // tee they existed for: nothing reads or rewrites a DML plan any more, so an
 // engine change to any of those shapes can no longer corrupt a delta.
 
+#include "dbsp_internal_connection.hpp"
 #include "../test_helpers.hpp"
 #include "catch.hpp"
 
 using namespace dbsp_test;
 using namespace duckdb;
+
+TEST_CASE("internal query guard comes from the focused boundary header",
+          "[engine_assumptions][internal_connection][header]") {
+  const auto depth_before = dbsp_native::internal_query_depth;
+  {
+    dbsp_native::InternalQueryGuard guard;
+    REQUIRE(dbsp_native::internal_query_depth == depth_before + 1);
+  }
+  REQUIRE(dbsp_native::internal_query_depth == depth_before);
+}
 
 TEST_CASE("canary: autocommit hook ordering", "[engine_assumptions]") {
   // The fold split (autocommit folds at QueryBegin, explicit txn at
@@ -110,5 +121,99 @@ TEST_CASE("internal connection preserves explicit transaction policy",
     REQUIRE_FALSE(owner->Query("SELECT 1")->HasError());
   }
   REQUIRE(dbsp_native::internal_query_depth == before);
+  db.exec("ROLLBACK");
+}
+
+TEST_CASE("plan keep-alive owns the registered internal context",
+          "[engine_assumptions][internal_connection][plan_keepalive]") {
+  DuckDBTestHarness db;
+  db.exec("CREATE TABLE retained_source (id INTEGER)");
+  auto &context = *db.conn().context;
+  auto &database = DatabaseInstance::GetDatabase(context);
+  auto &registry = dbsp_native::get_instance_registry();
+  const auto before = registry.internal_count(&database);
+  const auto depth_before = dbsp_native::internal_query_depth;
+  std::unique_ptr<dbsp_native::NativeMaterializedView> view;
+
+  {
+    dbsp_native::InternalQueryGuard query_guard;
+    auto translated = dbsp_native::PlanTranslator::translate(
+        context, "retained_view", "SELECT id FROM retained_source");
+    REQUIRE(translated.view);
+    view = std::move(translated.view);
+  }
+
+  REQUIRE(dbsp_native::internal_query_depth == depth_before);
+  REQUIRE(registry.internal_count(&database) == before + 1);
+  view.reset();
+  REQUIRE(registry.internal_count(&database) == before);
+}
+
+TEST_CASE("retained connection scopes the guard and owns registry membership",
+          "[engine_assumptions][internal_connection][retained]") {
+  DuckDBTestHarness db;
+  auto &context = *db.conn().context;
+  auto &database = DatabaseInstance::GetDatabase(context);
+  auto &registry = dbsp_native::get_instance_registry();
+  const auto before = registry.internal_count(&database);
+  const auto depth_before = dbsp_native::internal_query_depth;
+  std::unique_ptr<dbsp_native::RetainedInternalConnection> owner;
+  bool teardown_guarded = false;
+
+  struct TeardownProbe : ClientContextState {
+    bool *guarded = nullptr;
+    ~TeardownProbe() override {
+      if (guarded) {
+        *guarded = dbsp_native::internal_query_depth > 0;
+      }
+    }
+  };
+
+  {
+    dbsp_native::InternalQueryGuard query_guard;
+    owner = std::make_unique<dbsp_native::RetainedInternalConnection>(
+        dbsp_native::RetainedInternalConnection::open(
+            context, dbsp_native::InternalReadPolicy::AllowedInTxn,
+            "retained lifecycle canary"));
+    auto probe = (*owner)->context->registered_state->GetOrCreate<TeardownProbe>(
+        "dbsp_retained_internal_teardown_probe");
+    probe->guarded = &teardown_guarded;
+    REQUIRE_FALSE((*owner)->Query("SELECT 1")->HasError());
+  }
+
+  REQUIRE(dbsp_native::internal_query_depth == depth_before);
+  REQUIRE(registry.internal_count(&database) == before + 1);
+  auto *internal_context = (*owner)->context.get();
+  REQUIRE(registry.is_internal(internal_context));
+  owner.reset();
+  REQUIRE(teardown_guarded);
+  REQUIRE_FALSE(registry.is_internal(internal_context));
+  REQUIRE(registry.internal_count(&database) == before);
+
+  db.exec("BEGIN TRANSACTION");
+  auto forbidden = [&] {
+    auto rejected = dbsp_native::RetainedInternalConnection::open(
+        context, dbsp_native::InternalReadPolicy::Forbidden,
+        "retained policy canary");
+  };
+  if (dbsp_native::strict_internal_query()) {
+    REQUIRE_THROWS_WITH(forbidden(), Catch::Contains("retained policy canary"));
+  } else {
+    REQUIRE_NOTHROW(forbidden());
+  }
+  REQUIRE(dbsp_native::internal_query_depth == depth_before);
+  db.exec("ROLLBACK");
+}
+
+TEST_CASE("view-definition load preserves an open user transaction",
+          "[engine_assumptions][internal_connection][persistence]") {
+  DuckDBTestHarness db;
+  db.exec("CREATE TABLE _dbsp_views (name VARCHAR, sql VARCHAR, "
+          "sources VARCHAR, created_at BIGINT)");
+  db.exec("CREATE TABLE __dbsp_mv_meta (view_name VARCHAR)");
+  db.exec("BEGIN TRANSACTION");
+
+  REQUIRE(db.manager().load_from_duck_table(*db.conn().context));
+  REQUIRE(db.conn().context->transaction.HasActiveTransaction());
   db.exec("ROLLBACK");
 }

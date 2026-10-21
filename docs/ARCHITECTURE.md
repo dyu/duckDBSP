@@ -289,7 +289,7 @@ If a DRed overdelete or rederive fixpoint hits that cap before converging,
 `recompute()` rather than emit a silently corrupted diff — the linear
 signed path's `iterate()` cap trip recovers the same way.
 
-### 6. CDC Manager (`src/dbsp_cdc.hpp`)
+### 6. CDC Manager (`include/dbsp_cdc.hpp`)
 
 Central coordinator for change tracking and propagation.
 
@@ -368,7 +368,7 @@ static void LoadInternal(DatabaseInstance &instance) {
 ### View Creation
 
 ```
-1. User: CREATE MATERIALIZED VIEW totals AS 
+1. User: CREATE MATERIALIZED VIEW totals AS
          SELECT customer, SUM(amount) FROM orders GROUP BY customer
          │
 2. Planner frontend: DuckDB binds and plans the SQL
@@ -729,6 +729,7 @@ src/
 ├── dbsp_extension.cpp           # Entry point, function registration
 include/
 ├── dbsp_cdc.hpp                 # CDC manager, dependency graph
+├── dbsp_internal_connection.hpp # Scoped and retained internal connection owners
 ├── dbsp_context_state.hpp       # Auto-sync hooks + commit-time delta apply
 ├── dbsp_trigger_source.hpp      # Trigger-fed delta source (stock engine)
 ├── dbsp_duckdb_types.hpp        # DuckDB-native Z-sets and views
@@ -744,13 +745,14 @@ duckDBSP/
 
 ### Internal connection ownership
 
-`InternalConnection` in `dbsp_cdc.hpp` binds the recursion guard to the
-connection lifetime and checks the caller's explicit read policy before opening
-it. The guard survives connection destruction, including context teardown.
-Directly adjacent policy/guard/connection sites use this owner. Other legacy
-connection sites and policy/site forwarding remain; this is not blanket coverage
-of all internal connections. Checks preceding catch boundaries are retained.
+`dbsp_internal_connection.hpp` owns the scoped and retained internal connection
+APIs. `InternalConnection` checks the caller's explicit read policy and holds
+the recursion guard through connection/context teardown. The move-only
+`RetainedInternalConnection` keeps planner context registration for the plan's
+lifetime while guarding only connection creation and reset; the planner caller
+holds its own guard across binding queries. Persistence reads, planner catalog
+binding, arrangement-sidecar fingerprints, and the transaction-manager-only
+counter probe use explicit policies with their reasons at the call sites.
 The strict switch still cannot detect a user transaction already cleared before
-the commit hook. The `[internal_connection]` canaries cover teardown suppression,
-construction-failure unwinding, and explicit allowed/forbidden transaction policy;
-run them both normally and with `DBSP_STRICT_INTERNAL_QUERY=1` in a fresh process.
+the commit hook. Run `[internal_connection]` canaries normally and with
+`DBSP_STRICT_INTERNAL_QUERY=1` in separate processes.

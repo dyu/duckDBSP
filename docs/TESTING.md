@@ -84,20 +84,21 @@ have shipped and been fixed here — the sweep's DDL, the sweep's catalog-versio
 read, and the seeding scan — and until this switch nothing asked the question of
 the fourth.
 
-Mechanics (`dbsp_trigger_capability.hpp`): every site that opens an internal
-connection for a read of a USER table or for DDL declares an explicit
-`InternalReadPolicy{Forbidden, AllowedInTxn}` and a site name. Under the switch
-a `Forbidden` call made while `user_transaction_open(context)` throws an
+The policy and enforcement are defined in `dbsp_trigger_capability.hpp`; the
+connection owners live in `dbsp_internal_connection.hpp`. Every ordinary
+internal connection opened from a `ClientContext` declares an explicit
+`InternalReadPolicy{Forbidden, AllowedInTxn}` and a site name. Under the switch a
+`Forbidden` call made while `user_transaction_open(context)` throws an
 `InternalException` naming the site.
 
-The two tables below list every declaration site (the `Forbidden` table has
-five rows; `AllowedInTxn` the rest) — do not trust a quoted count, recount from
-the tree with `grep -rn 'InternalReadPolicy::' include src` — plus **6 helpers** that take the CALLER's policy rather than
-deciding for themselves (`stream_table_rows`, `stream_table_serialized`,
-`live_watermark`, `sync_table_scan_and_consume`, `fold_fresh_baseline`,
-`reconcile_untrusted_baselines`), and `sync_tables` / `sync_all`, which default
-to `Forbidden` so the commit reconcile is strict unless a caller says
-otherwise.
+The sections below group the explicit policy sites by behavior. A raw search
+with `rg -n 'InternalReadPolicy::' include src` also finds definitions and
+policy-forwarding signatures, so its match count is not the number of sites.
+Six helpers take the CALLER's policy rather than deciding for themselves
+(`stream_table_rows`, `stream_table_serialized`, `live_watermark`,
+`sync_table_scan_and_consume`, `fold_fresh_baseline`,
+`reconcile_untrusted_baselines`); `sync_tables` / `sync_all` default to
+`Forbidden` so commit reconciliation is strict unless a caller says otherwise.
 
 `Forbidden` — a call here inside an open user transaction is a bug:
 
@@ -109,23 +110,36 @@ otherwise.
 | the trigger sweep's DDL | the original defect of this family |
 | the untrusted-baseline reconcile, at commit and at read | measured, not assumed — see below |
 
-`AllowedInTxn` — every one for one of exactly two reasons:
+`AllowedInTxn` — every one states one of these reasons:
 
-*DDL/DML over DBSP's OWN bookkeeping tables* (`_dbsp_views`, `_dbsp_ckpt*`,
-`__mv_*`, the trigger sinks), which never needs the user's uncommitted catalog:
-`save_view_definitions`, `create_view`'s `_dbsp_views` upsert,
-`initialize_persistence_table`, `erase_persisted_view_row`,
-`erase_persisted_checkpoint_rows`, `set_mv_tables` (mirror backfill),
-`maybe_drain_trigger_sinks`, and `save_checkpoint`'s bookkeeping DDL.
+*Reads and writes of DBSP-owned bookkeeping state* (`_dbsp_views`,
+`__dbsp_mv_meta`, `_dbsp_ckpt*`, `__mv_*`, and trigger sinks), which use the
+internal committed view of DBSP's persisted metadata rather than the caller's
+uncommitted source rows: `save_view_definitions`, `load_from_duck_table` (view
+definitions and MV metadata), `create_view`'s
+`_dbsp_views` upsert, `initialize_persistence_table`,
+`erase_persisted_view_row`, `erase_persisted_checkpoint_rows`, `set_mv_tables`
+(mirror backfill), `maybe_drain_trigger_sinks`, and `save_checkpoint`'s
+bookkeeping DDL.
 
 *Reads that are RIGHT to see committed-only state*: the sweep's
 `duckdb_triggers()` presence read (a plain SELECT taking its own snapshot);
 `rebuild_all_views` and `materialize_deferred_locked`, which REFRESH a baseline
 that already exists rather than establishing one; `dbsp_sync()` / `dbsp_sync('t')`,
 where the caller asked for a reconcile against committed storage; and the
-watermarks in `save_checkpoint`, `checkpoint_valid` and `register_arrangements`,
-which describe committed storage and are compared against committed storage
-later, beside circuit state that is likewise committed-only.
+watermarks in `save_checkpoint`, `checkpoint_valid`, and
+`register_arrangements`' sidecar fingerprint, which describe committed storage
+and are compared against committed storage later, beside circuit state that is
+likewise committed-only.
+
+*Planner catalog binding*: `PlanTranslator::translate` binds catalog names and
+types without scanning source rows. If a source table exists only in the user's
+open transaction, the existing planner diagnostic still explains that the
+table is not yet committed.
+
+*Transaction-manager counter probe*: `probe_new_start_timestamp` starts and
+rolls back a transaction only to read DuckDB's transaction-manager counter; it
+reads no table data or catalog entries.
 
 **What the switch cannot catch.** It fires on `user_transaction_open(context)`,
 and the engine clears the transaction context BEFORE running the commit
@@ -140,10 +154,14 @@ It is OFF by default deliberately: such a call is a bug the commit reconcile
 usually papers over, and turning that paper-over into a crash in production
 would trade a wrong answer for an outage.
 
-`InternalQueryGuard` remains a context-free recursion guard.
-`InternalConnection` checks policy at construction and owns that guard through
-connection destruction. Shared helpers still forward explicit policy and site;
-every exception is documented at its call site.
+`InternalQueryGuard` remains a context-free recursion guard. The scoped
+`InternalConnection` in `dbsp_internal_connection.hpp` checks policy at
+construction and owns that guard through connection and context teardown. The
+move-only `RetainedInternalConnection` keeps a planner context registered until
+connection teardown, while guarding only open and reset; `PlanTranslator`'s
+caller holds a separate guard around planning queries. Shared helpers still
+forward explicit policy and site; each exception is documented at its call
+site.
 
 Proof it bites, run 2026-09-04: flipping the `duckdb_triggers()` whitelist to
 `Forbidden` turns the strict run red (`trigger_source` fails, 44/45) with
@@ -388,13 +406,14 @@ For questions or issues, see [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 ### Internal connection ownership
 
-`InternalConnection` in `dbsp_cdc.hpp` binds the recursion guard to the
-connection lifetime and checks the caller's explicit read policy before opening
-it. The guard survives connection destruction, including context teardown.
-Directly adjacent policy/guard/connection sites use this owner. Other legacy
-connection sites and policy/site forwarding remain; this is not blanket coverage
-of all internal connections. Checks preceding catch boundaries are retained.
+`dbsp_internal_connection.hpp` owns the scoped and retained connection APIs.
+`InternalConnection` keeps hook suppression active through connection/context
+teardown. `RetainedInternalConnection` keeps the planner context registered for
+the plan lifetime but does not carry a thread-local guard; the caller guards
+planner queries, and owner reset guards teardown. Context-backed opens in
+persistence loading, planner binding, and arrangement-sidecar watermarking use
+these owners with explicit policies. `probe_new_start_timestamp` uses the same
+scoped owner and documents that it reads only the transaction-manager counter.
 The strict switch still cannot detect a user transaction already cleared before
-the commit hook. The `[internal_connection]` canaries cover teardown suppression,
-construction-failure unwinding, and explicit allowed/forbidden transaction policy;
-run them both normally and with `DBSP_STRICT_INTERNAL_QUERY=1` in a fresh process.
+the commit hook. Run the `[internal_connection]` canaries normally and with
+`DBSP_STRICT_INTERNAL_QUERY=1` in separate processes.

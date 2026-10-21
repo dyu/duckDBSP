@@ -60,10 +60,9 @@ public:
       const std::vector<std::pair<std::string, TableSchema>> &mv_schemas = {}) {
     auto keep_alive = std::make_shared<PlanKeepAlive>();
     try {
-      auto &db = duckdb::DatabaseInstance::GetDatabase(context);
-      keep_alive->connection = std::make_unique<duckdb::Connection>(db);
-      get_instance_registry().register_internal(
-          keep_alive->connection->context.get(), &db);
+      keep_alive->connection = RetainedInternalConnection::open(
+          context, InternalReadPolicy::AllowedInTxn,
+          "PlanTranslator::translate (catalog binding only)");
       for (const auto &[mv_name, mv_schema] : mv_schemas) {
         std::string ddl = "CREATE TEMP TABLE \"" + mv_name + "\" (";
         for (size_t i = 0; i < mv_schema.columns.size(); i++) {

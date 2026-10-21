@@ -1,6 +1,6 @@
 # Internal connection boundary
 
-**Status:** Draft for review. This is subproject 1 of the repository-wide maintainability refactor. No implementation is authorized by this draft alone.
+**Status:** Approved for implementation on 2026-09-26. This is subproject 1 of the repository-wide maintainability refactor; implementation follows the approved inline plan on `main`.
 
 ## Problem
 
@@ -16,7 +16,7 @@ Make connection construction from a user `ClientContext` go through one small, e
 
 1. Move `InternalQueryGuard` and `InternalConnection` from `dbsp_cdc.hpp` into a focused `dbsp_internal_connection.hpp`. Keep the boundary independent of `CDCManager` state.
 2. Keep `InternalConnection` as the owner for short-lived work. It continues to check policy before construction and to declare guard ownership before connection ownership, so the connection and its client context are destroyed before the guard is released.
-3. Add a clearly named retained-connection factory on the same boundary for planner use. It applies an explicit policy, creates the connection while hook suppression is active, and registers its client context with `InstanceRegistry`. The caller remains responsible for holding an `InternalQueryGuard` across planner queries. The factory must not return a guard whose lifetime can accidentally follow the retained connection.
+3. Add a clearly named retained-connection owner on the same boundary for planner use. It applies an explicit policy, creates the connection while hook suppression is active, and registers its client context with `InstanceRegistry`. Its teardown closes the connection under a temporary guard before unregistering it. The caller remains responsible for holding an `InternalQueryGuard` across planner queries. The owner must not keep a thread-local guard alive for the retained connection's lifetime.
 4. Route the remaining user-context opens through one of those two APIs. Keep these existing policy contracts:
 
    | Site | Policy / reason |

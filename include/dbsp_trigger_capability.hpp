@@ -132,10 +132,11 @@ inline bool user_transaction_open(duckdb::ClientContext &context) {
 /// of the fourth.
 ///
 /// It stays a RULE rather than a blanket assertion because there are legitimate
-/// exceptions. `InternalConnection` owns the recursion guard and connection
-/// and checks this policy before constructing the connection. Shared scan
-/// helpers retain caller policy/site arguments because their transaction
-/// contracts differ. Guard-only scopes do not have a ClientContext to check.
+/// exceptions. The scoped owner in `dbsp_internal_connection.hpp` owns the
+/// recursion guard and connection and checks this policy before construction.
+/// Shared scan helpers retain caller policy/site arguments because their
+/// transaction contracts differ. Guard-only scopes do not have a ClientContext
+/// to check.
 ///
 /// Off by default. A `Forbidden` call inside a user transaction is a bug the
 /// commit reconcile usually papers over, and turning that paper-over into a
