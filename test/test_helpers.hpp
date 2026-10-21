@@ -107,7 +107,7 @@ public:
   }
 
   // Execute query and return result
-  unique_ptr<MaterializedQueryResult> query(const std::string &sql) {
+  unique_ptr<QueryResult> query(const std::string &sql) {
     return conn_.Query(sql);
   }
 
@@ -138,7 +138,7 @@ public:
       INFO("Query error: " << result->GetError());
     }
     REQUIRE_FALSE(result->HasError());
-    auto count = result->GetValue(0, 0).GetValue<int64_t>();
+    auto count = result->Collection().GetValue(0, 0).GetValue<int64_t>();
     REQUIRE(count == expected);
   }
 
@@ -151,10 +151,11 @@ public:
     REQUIRE_FALSE(result->HasError());
 
     std::vector<std::vector<Value>> rows;
+    const auto result_cells = result->Collection().GetRows();
     for (size_t i = 0; i < result->RowCount(); i++) {
       std::vector<Value> row;
       for (size_t j = 0; j < result->ColumnCount(); j++) {
-        row.push_back(result->GetValue(j, i));
+        row.push_back(result_cells.GetValue(j, i));
       }
       rows.push_back(row);
     }

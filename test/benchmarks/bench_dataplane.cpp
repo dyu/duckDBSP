@@ -16,7 +16,7 @@ namespace {
 constexpr idx_t N_ROWS = 1000000;
 
 // materialize a 1M-row three-column table into chunks once
-duckdb::unique_ptr<duckdb::MaterializedQueryResult> make_rows(
+duckdb::unique_ptr<duckdb::QueryResult> make_rows(
     DuckDBTestHarness &db) {
   db.exec("CREATE TABLE bd AS SELECT i AS id, i % 1000 AS grp, "
           "'val_' || (i % 977) AS name FROM range(1000000) t(i)");

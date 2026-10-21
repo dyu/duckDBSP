@@ -110,7 +110,7 @@ conn.execute("LOAD '" + ext + "'")
 for stmt in setup:
     conn.execute(stmt)
 conn.execute("CREATE MATERIALIZED VIEW v AS " + view_sql)
-conn.sql("SELECT * FROM dbsp_mv_tables(true)").fetchone()
+conn.execute("SELECT * FROM dbsp_mv_tables(true)").fetchone()
 for stmt in edits:
     conn.execute(stmt)
 print(repr(conn.sql(probe).fetchall()))

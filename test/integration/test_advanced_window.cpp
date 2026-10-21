@@ -21,11 +21,13 @@ void requireViewMatchesQuery(DuckDBTestHarness &db, const std::string &view,
   REQUIRE_FALSE(actual->HasError());
   REQUIRE(actual->ColumnCount() == expected->ColumnCount());
   REQUIRE(actual->RowCount() == expected->RowCount());
+  const auto actual_cells = actual->Collection().GetRows();
+  const auto expected_cells = expected->Collection().GetRows();
   for (size_t r = 0; r < expected->RowCount(); r++) {
     for (size_t c = 0; c < expected->ColumnCount(); c++) {
       INFO("row " << r << " col " << c);
-      REQUIRE(actual->GetValue(c, r).ToString() ==
-              expected->GetValue(c, r).ToString());
+      REQUIRE(actual_cells.GetValue(c, r).ToString() ==
+              expected_cells.GetValue(c, r).ToString());
     }
   }
 }

@@ -44,10 +44,12 @@ struct ShapeFixture {
     REQUIRE_FALSE(expected->HasError());
     REQUIRE_FALSE(actual->HasError());
     REQUIRE(actual->RowCount() == expected->RowCount());
+    const auto actual_cells = actual->Collection().GetRows();
+    const auto expected_cells = expected->Collection().GetRows();
     for (size_t r = 0; r < expected->RowCount(); r++) {
       for (size_t c = 0; c < expected->ColumnCount(); c++) {
-        REQUIRE(actual->GetValue(c, r).ToString() ==
-                expected->GetValue(c, r).ToString());
+        REQUIRE(actual_cells.GetValue(c, r).ToString() ==
+                expected_cells.GetValue(c, r).ToString());
       }
     }
   }
@@ -91,7 +93,7 @@ TEST_CASE("dml shapes: post-write subquery DELETE stays O(delta)",
   fx.check();
   // the subquery must have seen the txn-local INSERT: id 4 deleted too
   auto res = fx.db.query("SELECT COUNT(*) FROM tt");
-  REQUIRE(res->GetValue(0, 0).GetValue<int64_t>() == 1); // only id 2 left
+  REQUIRE(res->Collection().GetValue(0, 0).GetValue<int64_t>() == 1); // only id 2 left
   fx.finish();
 }
 
@@ -200,9 +202,11 @@ TEST_CASE("dml shapes: indexed-column UPDATE (del_and_insert) stays O(delta)",
                            "WHERE val > 5) ORDER BY ALL");
   auto actual = db.query("SELECT * FROM dbsp_query('tv_pk2') ORDER BY ALL");
   REQUIRE(actual->RowCount() == expected->RowCount());
+  const auto actual_cells = actual->Collection().GetRows();
+  const auto expected_cells = expected->Collection().GetRows();
   for (size_t r = 0; r < expected->RowCount(); r++) {
-    REQUIRE(actual->GetValue(0, r).ToString() ==
-            expected->GetValue(0, r).ToString());
+    REQUIRE(actual_cells.GetValue(0, r).ToString() ==
+            expected_cells.GetValue(0, r).ToString());
   }
   db.exec("SELECT * FROM dbsp_auto_sync(false)");
 }
@@ -257,16 +261,18 @@ TEST_CASE("dml shapes: non-repeatable INSERT sources stay O(delta)",
     REQUIRE(m.scan_syncs() == scans);
     REQUIRE(m.exact_delta_syncs() == caps + 1);
     auto res = fx.db.query("SELECT MAX(id), COUNT(*) FROM tseq");
-    REQUIRE(res->GetValue(0, 0).GetValue<int64_t>() == 1); // advanced once
-    REQUIRE(res->GetValue(1, 0).GetValue<int64_t>() == 1);
+    REQUIRE(res->Collection().GetValue(0, 0).GetValue<int64_t>() == 1); // advanced once
+    REQUIRE(res->Collection().GetValue(1, 0).GetValue<int64_t>() == 1);
     // the applied delta must be exactly what the table holds
     auto view = fx.db.query("SELECT * FROM dbsp_query('tv_seq') ORDER BY ALL");
     auto truth = fx.db.query("SELECT id, v FROM tseq ORDER BY ALL");
     REQUIRE(view->RowCount() == truth->RowCount());
+    const auto view_cells = view->Collection().GetRows();
+    const auto truth_cells = truth->Collection().GetRows();
     for (size_t r = 0; r < truth->RowCount(); r++) {
       for (size_t c = 0; c < truth->ColumnCount(); c++) {
-        REQUIRE(view->GetValue(c, r).ToString() ==
-                truth->GetValue(c, r).ToString());
+        REQUIRE(view_cells.GetValue(c, r).ToString() ==
+                truth_cells.GetValue(c, r).ToString());
       }
     }
   }

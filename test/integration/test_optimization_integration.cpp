@@ -43,9 +43,9 @@ TEST_CASE("Optimization Integration", "[optimization]") {
         db.query("SELECT * FROM dbsp_query('v_optimized') ORDER BY id");
     REQUIRE(!result->HasError());
     REQUIRE(result->RowCount() == 1);
-    REQUIRE(result->GetValue(0, 0).GetValue<int>() == 2);
-    REQUIRE(result->GetValue(1, 0).GetValue<int>() == 200);
-    REQUIRE(result->GetValue(2, 0).GetValue<int>() == 20);
+    REQUIRE(result->Collection().GetValue(0, 0).GetValue<int>() == 2);
+    REQUIRE(result->Collection().GetValue(1, 0).GetValue<int>() == 200);
+    REQUIRE(result->Collection().GetValue(2, 0).GetValue<int>() == 20);
 
     // Drop view
     db.exec("SELECT dbsp_drop('v_optimized')");
@@ -68,8 +68,8 @@ TEST_CASE("Optimization Integration", "[optimization]") {
     auto result = db.query("SELECT * FROM dbsp_query('v_pruned')");
     REQUIRE(!result->HasError());
     REQUIRE(result->RowCount() == 1);
-    REQUIRE(result->GetValue(0, 0).GetValue<int>() == 1);
-    REQUIRE(result->GetValue(1, 0).GetValue<int>() == 10);
+    REQUIRE(result->Collection().GetValue(0, 0).GetValue<int>() == 1);
+    REQUIRE(result->Collection().GetValue(1, 0).GetValue<int>() == 10);
 
     // Verify modifications propagate correctly (even if pruned)
     db.exec(
@@ -84,8 +84,8 @@ TEST_CASE("Optimization Integration", "[optimization]") {
     REQUIRE(!result2->HasError());
     REQUIRE(result2->RowCount() == 2);
 
-    REQUIRE(result2->GetValue(0, 1).GetValue<int>() == 2);
-    REQUIRE(result2->GetValue(1, 1).GetValue<int>() == 11);
+    REQUIRE(result2->Collection().GetValue(0, 1).GetValue<int>() == 2);
+    REQUIRE(result2->Collection().GetValue(1, 1).GetValue<int>() == 11);
   }
 
   SECTION("Filter+Project Operator Fusion") {

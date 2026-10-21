@@ -452,7 +452,7 @@ inline bool sink_exists(duckdb::Connection &con, const std::string &catalog,
   if (r->HasError() || r->RowCount() == 0) {
     return false;
   }
-  return r->GetValue(0, 0).GetValue<int64_t>() > 0;
+  return r->Collection().GetValue(0, 0).GetValue<int64_t>() > 0;
 }
 
 /// Every DBSP trigger currently in the catalog, as
@@ -480,10 +480,11 @@ read_dbsp_triggers(duckdb::Connection &con) {
         "DBSP trigger source: could not read duckdb_triggers(): %s",
         r->GetError());
   }
+  const auto r_cells = r->Collection().GetRows();
   for (duckdb::idx_t i = 0; i < r->RowCount(); i++) {
-    out[r->GetValue(0, i).ToString() + "." + r->GetValue(1, i).ToString() +
-        "." + r->GetValue(2, i).ToString()]
-        .push_back(r->GetValue(3, i).ToString());
+    out[r_cells.GetValue(0, i).ToString() + "." + r_cells.GetValue(1, i).ToString() +
+        "." + r_cells.GetValue(2, i).ToString()]
+        .push_back(r_cells.GetValue(3, i).ToString());
   }
   return out;
 }
@@ -975,9 +976,10 @@ inline void maybe_drain_trigger_sinks(duckdb::ClientContext &context) {
     if (r->HasError()) {
       return;
     }
+    const auto r_cells = r->Collection().GetRows();
     for (duckdb::idx_t i = 0; i < r->RowCount(); i++) {
-      const std::string sink = sink_name_for(r->GetValue(0, i).ToString(),
-                                             r->GetValue(1, i).ToString());
+      const std::string sink = sink_name_for(r_cells.GetValue(0, i).ToString(),
+                                             r_cells.GetValue(1, i).ToString());
       con.Query("DELETE FROM " + sink);
     }
   } catch (...) {

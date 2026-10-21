@@ -1,5 +1,68 @@
 # Changelog
 
+## Engine: DuckDB v2.0.0 LTS — 2026-10-21
+
+**The engine moves from the 2.0 alpha (`v2.0.0-alpha39998`, `a00803f7`) to
+the `v2.0.0` LTS release (`d54cbbe3`).** `build.sh` pins the release by
+commit. The extension loads into the `duckdb==2.0.0` PyPI wheel.
+
+The API changes between the alpha and the release were ported:
+- `MaterializedQueryResult` is gone. Reads go through
+  `QueryResult::Collection()`.
+- `Connection::SendQuery` is gone. The two streaming table scans use
+  `Submit()` plus `QueryResultStream<>`.
+- `ClientContext::Query` takes `QueryParameters`.
+- Table-function varargs and named parameters are declared through
+  `GetSignature()`.
+- `Parser` is built with `GetBuiltinParser()`.
+- The DuckDB extensions are linked with `duckdb_link_extensions()`.
+- `LowestActiveStart()` became the opaque `LowestVisibilityBound()`. The bound
+  holds the same number in every state, so the provisional-baseline
+  watermark logic is unchanged. It is expressed through the bound's
+  comparisons (`no_active_start_before`).
+
+**Quadratic result reads, caught by the suite.** In 2.0.0,
+`ColumnDataCollection::GetValue(c, r)` materializes every row on each call.
+Every per-row loop over a query result became O(rows²·columns): one
+`planner_frontend` differential ran for 4h40m before it was killed. The
+quadratic loops in production were the checkpoint and view-catalog restore
+paths (9 loops) and the trigger reads. Those loops, and 23 more in the tests,
+now take `GetRows()` once and read cells from it. `planner_frontend` is back
+to 14s.
+
+Fixed along the way:
+- **Commit-hook establish gate.** With no live transaction, the gate is meant
+  to establish an untainted baseline when no transaction is active at all.
+  It compared the bound with `IncludingUncommitted()`, a value the manager
+  holds only before its first transaction starts. Once any transaction has
+  ended, an empty active set rests at `AllCommitted()`, so the gate always
+  refused. The alpha had the same defect. `no_active_transaction()` now
+  accepts both empty states.
+- **Streaming scans fail loudly on a mid-stream error.** `Fetch()` returns
+  null both at the end and on an execution error. The scans now check
+  `HasError()` before treating null as the end, so a truncated scan can no
+  longer pass for the whole table. The old `SendQuery` loops had the same
+  silent truncation.
+- **`DBSP_DEBUG_SEED` shows the lowest bound again.** It is recovered by a
+  64-step binary search over the bound's `<` operator, used for debug output
+  only.
+- **`build.sh` repo guard.** The guard compares the `duckdb/` toplevel by file
+  identity (`-ef`) rather than as a string. Invoking the script through a
+  differently-cased path on a case-insensitive filesystem no longer fails it.
+
+Re-verified on v2.0.0:
+- The `string_agg` separator layout mirror, against source and through the
+  J2 ORDER BY differential.
+- The trigger-tracking constraints in the README, through `trigger_source`.
+
+- The 2.0 alpha issues listed further down (see the note there).
+
+Python probes: 30/30 exit 0 on the `duckdb==2.0.0` wheel. Two needed
+`conn.sql(...).fetchone()` changed to `conn.execute(...).fetchone()`, because
+the 2.0.0 Python client removed `fetchone()` from relations.
+
+45/45 ctest green.
+
 ## Perf: declared view keys — the delta DELETE stops scanning every column — 2026-09-12
 
 **Applying a one-row delta to a materialized view scanned the entire view
@@ -1061,6 +1124,11 @@ capture. `duckdb/` was reverted to stock `a00803f7687ca3d7188d417216e288c5c4b22b
 
 Open problems in the pinned engine (v2.0.0-alpha39998, `a00803f7`) that the
 fork works around or lives with. Re-check each on an engine bump.
+
+*Re-checked on v2.0.0 (2026-10-21):* the interpreter-exit SIGSEGV did not
+reproduce (0 of 15 runs of an open-connection probe, against the alpha's
+roughly 2 in 5), and the `DROP MATERIALIZED VIEW` behaviour pinned by `test_ddl_syntax.py`
+is unchanged (the script passes).
 
 ### SIGSEGV when a DBSP-carrying instance is destroyed at interpreter exit
 

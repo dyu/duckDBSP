@@ -50,8 +50,8 @@ TEST_CASE("Phase 1.1: View definitions persist across restarts",
 
     // Check that view was saved to _dbsp_views
     auto result = con.Query("SELECT COUNT(*) FROM _dbsp_views WHERE name = 'high_value'");
-    auto &mat = result->Cast<duckdb::MaterializedQueryResult>();
-    REQUIRE(mat.GetValue(0, 0).GetValue<int64_t>() == 1);
+    auto &mat = *result;
+    REQUIRE(mat.Collection().GetValue(0, 0).GetValue<int64_t>() == 1);
   }
 
   // Simulate crash and recovery: reset CDC manager but keep database
@@ -267,8 +267,8 @@ TEST_CASE("Phase 1.5: Drop view removes from persistence",
 
   // Verify saved to persistence
   auto result = con.Query("SELECT COUNT(*) FROM _dbsp_views WHERE name = 'test_view'");
-  auto &mat = result->Cast<duckdb::MaterializedQueryResult>();
-  REQUIRE(mat.GetValue(0, 0).GetValue<int64_t>() == 1);
+  auto &mat = *result;
+  REQUIRE(mat.Collection().GetValue(0, 0).GetValue<int64_t>() == 1);
 
   // Drop view (need transaction)
   con.BeginTransaction();
@@ -277,8 +277,8 @@ TEST_CASE("Phase 1.5: Drop view removes from persistence",
 
   // Verify removed from persistence
   result = con.Query("SELECT COUNT(*) FROM _dbsp_views WHERE name = 'test_view'");
-  auto &mat2 = result->Cast<duckdb::MaterializedQueryResult>();
-  REQUIRE(mat2.GetValue(0, 0).GetValue<int64_t>() == 0);
+  auto &mat2 = *result;
+  REQUIRE(mat2.Collection().GetValue(0, 0).GetValue<int64_t>() == 0);
 
   // Simulate crash and recovery (re-enable recovery first)
   cdc_manager.reset();

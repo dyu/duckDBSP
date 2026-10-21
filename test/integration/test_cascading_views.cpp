@@ -122,9 +122,10 @@ TEST_CASE("dbsp_deps shows dependencies", "[integration][cascade][deps]") {
     // Verify v2 depends on v1 and is depended on by v3
     bool found_v1 = false;
     bool found_v3 = false;
+    const auto result_cells = result->Collection().GetRows();
     for (size_t i = 0; i < result->RowCount(); i++) {
-        auto name = result->GetValue(0, i).ToString();
-        auto relationship = result->GetValue(1, i).ToString();
+        auto name = result_cells.GetValue(0, i).ToString();
+        auto relationship = result_cells.GetValue(1, i).ToString();
 
         if (name == "v1" && relationship == "depends_on") {
             found_v1 = true;
@@ -157,13 +158,13 @@ TEST_CASE("dbsp_drop_cascade removes dependents", "[integration][cascade][drop]"
 
     // Regular drop should fail because of dependents
     auto drop_result = db.query("SELECT dbsp_drop('level1')");
-    REQUIRE(drop_result->GetValue(0, 0).ToString().find("Cannot drop") != std::string::npos);
+    REQUIRE(drop_result->Collection().GetValue(0, 0).ToString().find("Cannot drop") != std::string::npos);
 
     // Cascade drop should remove level1 and all dependents
     auto cascade_result = db.query("SELECT dbsp_drop_cascade('level1')");
     REQUIRE_FALSE(cascade_result->HasError());
 
-    auto msg = cascade_result->GetValue(0, 0).ToString();
+    auto msg = cascade_result->Collection().GetValue(0, 0).ToString();
     REQUIRE(msg.find("Dropped") != std::string::npos);
 
     // All views should be gone
@@ -198,7 +199,7 @@ TEST_CASE("Cycle detection prevents infinite loops", "[integration][cascade][cyc
     // Should either error in SQL parsing or cycle detection
     // We check that it doesn't succeed
     if (!self_ref->HasError()) {
-        auto msg = self_ref->GetValue(0, 0).ToString();
+        auto msg = self_ref->Collection().GetValue(0, 0).ToString();
         REQUIRE(msg.find("Error") != std::string::npos);
     }
 }
@@ -231,7 +232,7 @@ TEST_CASE("Join of two sibling MVs stays exact across repeated updates",
         "SELECT c FROM dbsp_query('mv_c') WHERE k = 3");
     REQUIRE_FALSE(result->HasError());
     REQUIRE(result->RowCount() == 1);
-    REQUIRE(result->GetValue(0, 0).GetValue<double>() == 21012.0);
+    REQUIRE(result->Collection().GetValue(0, 0).GetValue<double>() == 21012.0);
 }
 
 TEST_CASE("Replace a mid-chain view rebuilds only its subtree",
@@ -247,13 +248,13 @@ TEST_CASE("Replace a mid-chain view rebuilds only its subtree",
     db.exec("SELECT * FROM dbsp_replace_view('lvl1', "
             "'SELECT k, v * 3 AS d FROM base')");
     auto rows = db.query("SELECT e FROM dbsp_query('lvl2') WHERE k = 2");
-    REQUIRE(rows->GetValue(0, 0).GetValue<double>() == 7.0); // 2*3+1
+    REQUIRE(rows->Collection().GetValue(0, 0).GetValue<double>() == 7.0); // 2*3+1
 
     // Still incremental afterwards
     db.exec("INSERT INTO base VALUES (3, 3.0)");
     db.exec("SELECT * FROM dbsp_sync('base')");
     rows = db.query("SELECT e FROM dbsp_query('lvl2') WHERE k = 3");
-    REQUIRE(rows->GetValue(0, 0).GetValue<double>() == 10.0); // 3*3+1
+    REQUIRE(rows->Collection().GetValue(0, 0).GetValue<double>() == 10.0); // 3*3+1
 }
 
 TEST_CASE("CREATE OR REPLACE MATERIALIZED VIEW maps to replace",
@@ -263,7 +264,7 @@ TEST_CASE("CREATE OR REPLACE MATERIALIZED VIEW maps to replace",
     db.exec("CREATE OR REPLACE MATERIALIZED VIEW mv AS SELECT k FROM base");     // create
     db.exec("CREATE OR REPLACE MATERIALIZED VIEW mv AS SELECT k + 1 AS k FROM base"); // replace
     auto rows = db.query("SELECT k FROM dbsp_query('mv')");
-    REQUIRE(rows->GetValue(0, 0).GetValue<int32_t>() == 2);
+    REQUIRE(rows->Collection().GetValue(0, 0).GetValue<int32_t>() == 2);
 }
 
 TEST_CASE("Replace with bad SQL reports and leaves registry queryable",
@@ -305,7 +306,7 @@ TEST_CASE("Multi-level cascade failure reports every lost dependent",
     // midA itself is queryable under its new definition.
     auto rows = db.query("SELECT e FROM dbsp_query('midA') WHERE k = 1");
     REQUIRE_FALSE(rows->HasError());
-    REQUIRE(rows->GetValue(0, 0).GetValue<double>() == 1.0);
+    REQUIRE(rows->Collection().GetValue(0, 0).GetValue<double>() == 1.0);
 
     // midB/endC are really gone (not just failed once and left dangling).
     REQUIRE(db.query("SELECT * FROM dbsp_query('midB')")->HasError());
@@ -315,5 +316,5 @@ TEST_CASE("Multi-level cascade failure reports every lost dependent",
     auto persisted = db.query(
         "SELECT COUNT(*) FROM _dbsp_views WHERE name IN ('midB', 'endC')");
     REQUIRE_FALSE(persisted->HasError());
-    REQUIRE(persisted->GetValue(0, 0).GetValue<int64_t>() == 0);
+    REQUIRE(persisted->Collection().GetValue(0, 0).GetValue<int64_t>() == 0);
 }

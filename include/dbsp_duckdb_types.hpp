@@ -712,7 +712,7 @@ public:
   // were no triggers when the statement ran. Measured before this state:
   // `view 10.0 / sql 13.0`, then `14.0 / 17.0`, and it never healed. The
   // watermark is a transaction-manager start timestamp newer than every
-  // transaction alive at seed time; once `LowestActiveStart() >= watermark`
+  // transaction alive at seed time; once `LowestVisibilityBound() >= watermark`
   // every one of them has ended and one scan of committed storage pays the
   // debt (CDCManager::sync_tables retires it there, on a scan that SUCCEEDED).
   //

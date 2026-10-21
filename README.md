@@ -3,7 +3,7 @@
 Real-time incrementally maintained materialized views for DuckDB, based on [Database Stream Processing (DBSP)](https://www.feldera.com/blog/what-is-dbsp) theory.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![DuckDB](https://img.shields.io/badge/DuckDB-v2.0.0--alpha39998-blue.svg)](https://duckdb.org/)
+[![DuckDB](https://img.shields.io/badge/DuckDB-v2.0.0_LTS-blue.svg)](https://duckdb.org/)
 
 ## Overview
 
@@ -162,9 +162,9 @@ correctness never depends on a trigger having fired.
 
 #### What tracking a table costs it
 
-These are engine behaviours, measured on `v2.0.0-alpha39998` and pinned by
-`test/unit/test_trigger_source.cpp`. They are permanent constraints on every
-tracked table, to be re-checked when DuckDB 2.0 goes stable.
+These are engine behaviours, measured on `v2.0.0-alpha39998`, re-verified on
+the `v2.0.0` LTS release, and pinned by `test/unit/test_trigger_source.cpp`.
+They are permanent constraints on every tracked table.
 
 | On a tracked (triggered) table | Engine response |
 |---|---|
@@ -229,7 +229,7 @@ reconciled by scan until every transaction alive at seed time has ended.
 **not** part of `ctest`. Each takes the extension path and prints `PASS`:
 
 ```bash
-uv run --isolated --with 'duckdb==1.6.0.dev379' --with pyarrow \
+uv run --isolated --with 'duckdb==2.0.0' --with pyarrow \
   python test/python/test_ddl_syntax.py build/dbsp.duckdb_extension
 ```
 

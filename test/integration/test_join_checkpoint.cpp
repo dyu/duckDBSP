@@ -115,14 +115,14 @@ TEST_CASE("join checkpoint: LEFT join view round-trips pad state",
 
     auto save_result = db.query("SELECT * FROM dbsp_save()");
     REQUIRE_FALSE(save_result->HasError());
-    const std::string save_msg = save_result->GetValue(0, 0).ToString();
+    const std::string save_msg = save_result->Collection().GetValue(0, 0).ToString();
     REQUIRE(save_msg.find("circuit checkpoint: 2 views") != std::string::npos);
 
     REQUIRE_FALSE(db.query("SELECT dbsp_drop('v_restore')")->HasError());
 
     auto load_result = db.query("SELECT * FROM dbsp_load()");
     REQUIRE_FALSE(load_result->HasError());
-    const std::string load_msg = load_result->GetValue(0, 0).ToString();
+    const std::string load_msg = load_result->Collection().GetValue(0, 0).ToString();
     // Only v_restore needed reloading (v_live was still live, skipped).
     REQUIRE(load_msg.find("1 from checkpoint") != std::string::npos);
     REQUIRE(snapshotView(db, "v_live") == snapshotView(db, "v_restore"));
@@ -176,14 +176,14 @@ TEST_CASE("join checkpoint: RIGHT join view round-trips pad state",
 
     auto save_result = db.query("SELECT * FROM dbsp_save()");
     REQUIRE_FALSE(save_result->HasError());
-    const std::string save_msg = save_result->GetValue(0, 0).ToString();
+    const std::string save_msg = save_result->Collection().GetValue(0, 0).ToString();
     REQUIRE(save_msg.find("circuit checkpoint: 2 views") != std::string::npos);
 
     REQUIRE_FALSE(db.query("SELECT dbsp_drop('v_restore')")->HasError());
 
     auto load_result = db.query("SELECT * FROM dbsp_load()");
     REQUIRE_FALSE(load_result->HasError());
-    const std::string load_msg = load_result->GetValue(0, 0).ToString();
+    const std::string load_msg = load_result->Collection().GetValue(0, 0).ToString();
     // Only v_restore needed reloading (v_live was still live, skipped).
     REQUIRE(load_msg.find("1 from checkpoint") != std::string::npos);
     REQUIRE(snapshotView(db, "v_live") == snapshotView(db, "v_restore"));
@@ -221,7 +221,7 @@ TEST_CASE("join checkpoint: version-mismatched blob falls back to rebuild",
     REQUIRE_FALSE(db.query("SELECT dbsp_drop('v_stale')")->HasError());
     auto load_result = db.query("SELECT * FROM dbsp_load()");
     REQUIRE_FALSE(load_result->HasError());
-    const std::string load_msg = load_result->GetValue(0, 0).ToString();
+    const std::string load_msg = load_result->Collection().GetValue(0, 0).ToString();
     REQUIRE(load_msg.find("0 from checkpoint") != std::string::npos);
 
     // Rebuilt-by-replay view must still be correct.
@@ -262,7 +262,7 @@ TEST_CASE("join checkpoint: stale checkpoint declined when view SQL changed "
 
     auto load_result = db.query("SELECT * FROM dbsp_load()");
     REQUIRE_FALSE(load_result->HasError());
-    const std::string load_msg = load_result->GetValue(0, 0).ToString();
+    const std::string load_msg = load_result->Collection().GetValue(0, 0).ToString();
     // The fingerprint mismatch must decline the fast path for v_fp: it
     // does not count as "from checkpoint" even though a checkpoint blob
     // for it exists.
@@ -363,14 +363,14 @@ TEST_CASE("aggregate checkpoint: MAX round-trips through save/restore, "
 
     auto save_result = db.query("SELECT * FROM dbsp_save()");
     REQUIRE_FALSE(save_result->HasError());
-    const std::string save_msg = save_result->GetValue(0, 0).ToString();
+    const std::string save_msg = save_result->Collection().GetValue(0, 0).ToString();
     REQUIRE(save_msg.find("circuit checkpoint: 2 views") != std::string::npos);
 
     REQUIRE_FALSE(db.query("SELECT dbsp_drop('v_restore')")->HasError());
 
     auto load_result = db.query("SELECT * FROM dbsp_load()");
     REQUIRE_FALSE(load_result->HasError());
-    const std::string load_msg = load_result->GetValue(0, 0).ToString();
+    const std::string load_msg = load_result->Collection().GetValue(0, 0).ToString();
     // Only v_restore needed reloading (v_live was still live, skipped).
     REQUIRE(load_msg.find("1 from checkpoint") != std::string::npos);
     REQUIRE(snapshotView(db, "v_live") == snapshotView(db, "v_restore"));
@@ -415,14 +415,14 @@ TEST_CASE("aggregate checkpoint: MIN round-trips through save/restore, "
 
     auto save_result = db.query("SELECT * FROM dbsp_save()");
     REQUIRE_FALSE(save_result->HasError());
-    const std::string save_msg = save_result->GetValue(0, 0).ToString();
+    const std::string save_msg = save_result->Collection().GetValue(0, 0).ToString();
     REQUIRE(save_msg.find("circuit checkpoint: 2 views") != std::string::npos);
 
     REQUIRE_FALSE(db.query("SELECT dbsp_drop('v_restore')")->HasError());
 
     auto load_result = db.query("SELECT * FROM dbsp_load()");
     REQUIRE_FALSE(load_result->HasError());
-    const std::string load_msg = load_result->GetValue(0, 0).ToString();
+    const std::string load_msg = load_result->Collection().GetValue(0, 0).ToString();
     REQUIRE(load_msg.find("1 from checkpoint") != std::string::npos);
     REQUIRE(snapshotView(db, "v_live") == snapshotView(db, "v_restore"));
 
@@ -554,14 +554,14 @@ TEST_CASE("checkpoint blob codec: view spanning every codec value shape "
 
     auto save_result = db.query("SELECT * FROM dbsp_save()");
     REQUIRE_FALSE(save_result->HasError());
-    REQUIRE(save_result->GetValue(0, 0).ToString().find(
+    REQUIRE(save_result->Collection().GetValue(0, 0).ToString().find(
                 "circuit checkpoint: 2 views") != std::string::npos);
 
     REQUIRE_FALSE(db.query("SELECT dbsp_drop('v_restore')")->HasError());
 
     auto load_result = db.query("SELECT * FROM dbsp_load()");
     REQUIRE_FALSE(load_result->HasError());
-    REQUIRE(load_result->GetValue(0, 0).ToString().find(
+    REQUIRE(load_result->Collection().GetValue(0, 0).ToString().find(
                 "1 from checkpoint") != std::string::npos);
     REQUIRE(snapshotView(db, "v_live") == snapshotView(db, "v_restore"));
 
@@ -686,7 +686,7 @@ TEST_CASE("recursive-view checkpoint: linear UNION ALL round-trips through "
 
     auto save_result = db.query("SELECT * FROM dbsp_save()");
     REQUIRE_FALSE(save_result->HasError());
-    REQUIRE(save_result->GetValue(0, 0).ToString().find(
+    REQUIRE(save_result->Collection().GetValue(0, 0).ToString().find(
                 "circuit checkpoint: 2 views") != std::string::npos);
 
     REQUIRE_FALSE(db.query("SELECT dbsp_drop('v_restore')")->HasError());
@@ -694,7 +694,7 @@ TEST_CASE("recursive-view checkpoint: linear UNION ALL round-trips through "
     auto load_result = db.query("SELECT * FROM dbsp_load()");
     REQUIRE_FALSE(load_result->HasError());
     // Only v_restore needed reloading (v_live was still live, skipped).
-    REQUIRE(load_result->GetValue(0, 0).ToString().find(
+    REQUIRE(load_result->Collection().GetValue(0, 0).ToString().find(
                 "1 from checkpoint") != std::string::npos);
     REQUIRE(snapshotView(db, "v_live") == snapshotView(db, "v_restore"));
 
@@ -763,13 +763,13 @@ TEST_CASE("recursive-view checkpoint: post-restore max_iterations_ trip "
 
     auto save_result = db.query("SELECT * FROM dbsp_save()");
     REQUIRE_FALSE(save_result->HasError());
-    REQUIRE(save_result->GetValue(0, 0).ToString().find(
+    REQUIRE(save_result->Collection().GetValue(0, 0).ToString().find(
                 "circuit checkpoint: 2 views") != std::string::npos);
 
     REQUIRE_FALSE(db.query("SELECT dbsp_drop('v_restore')")->HasError());
     auto load_result = db.query("SELECT * FROM dbsp_load()");
     REQUIRE_FALSE(load_result->HasError());
-    REQUIRE(load_result->GetValue(0, 0).ToString().find(
+    REQUIRE(load_result->Collection().GetValue(0, 0).ToString().find(
                 "1 from checkpoint") != std::string::npos);
     REQUIRE(snapshotView(db, "v_live") == snapshotView(db, "v_restore"));
 
@@ -876,7 +876,7 @@ TEST_CASE("window-view checkpoint: round-trips through save/restore, a "
 
     auto save_result = db.query("SELECT * FROM dbsp_save()");
     REQUIRE_FALSE(save_result->HasError());
-    REQUIRE(save_result->GetValue(0, 0).ToString().find(
+    REQUIRE(save_result->Collection().GetValue(0, 0).ToString().find(
                 "circuit checkpoint: 2 views") != std::string::npos);
 
     REQUIRE_FALSE(db.query("SELECT dbsp_drop('v_restore')")->HasError());
@@ -884,7 +884,7 @@ TEST_CASE("window-view checkpoint: round-trips through save/restore, a "
     auto load_result = db.query("SELECT * FROM dbsp_load()");
     REQUIRE_FALSE(load_result->HasError());
     // Only v_restore needed reloading (v_live was still live, skipped).
-    REQUIRE(load_result->GetValue(0, 0).ToString().find(
+    REQUIRE(load_result->Collection().GetValue(0, 0).ToString().find(
                 "1 from checkpoint") != std::string::npos);
     REQUIRE(snapshotView(db, "v_live") == snapshotView(db, "v_restore"));
 

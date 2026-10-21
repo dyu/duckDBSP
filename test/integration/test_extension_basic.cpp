@@ -17,7 +17,7 @@ TEST_CASE("dbsp_track tracks table", "[integration][track]") {
     REQUIRE_FALSE(result->HasError());
 
     // Verify response
-    auto msg = result->GetValue(0, 0).ToString();
+    auto msg = result->Collection().GetValue(0, 0).ToString();
     REQUIRE(msg.find("Tracking table: orders") != std::string::npos);
 
     // Verify table appears in tracked list
@@ -357,7 +357,7 @@ TEST_CASE("read surface: chunks satisfy VERIFY_VECTORS",
   } guard{db};
   db.exec("SET GLOBAL debug_verification_mode='verify_vectors'");
   REQUIRE(db.query("SELECT current_setting('debug_verification_mode')")
-              ->GetValue(0, 0)
+              ->Collection().GetValue(0, 0)
               .ToString() == "VERIFY_VECTORS");
 
   db.createTable("vt", "id INT, val INT, tag VARCHAR",
@@ -405,10 +405,12 @@ TEST_CASE("read surface: IS [NOT] NULL over dbsp_query matches SQL",
     // returning FEWER columns would read out of range and a view returning
     // MORE would go unnoticed.
     REQUIRE(actual->ColumnCount() == expected->ColumnCount());
+    const auto actual_cells = actual->Collection().GetRows();
+    const auto expected_cells = expected->Collection().GetRows();
     for (size_t r = 0; r < expected->RowCount(); r++) {
       for (size_t c = 0; c < expected->ColumnCount(); c++) {
-        REQUIRE(actual->GetValue(c, r).ToString() ==
-                expected->GetValue(c, r).ToString());
+        REQUIRE(actual_cells.GetValue(c, r).ToString() ==
+                expected_cells.GetValue(c, r).ToString());
       }
     }
   };

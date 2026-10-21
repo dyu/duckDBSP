@@ -32,11 +32,13 @@ void requireViewMatchesQuery(DuckDBTestHarness &db, const std::string &view,
   REQUIRE_FALSE(actual->HasError());
   REQUIRE(actual->ColumnCount() == expected->ColumnCount());
   REQUIRE(actual->RowCount() == expected->RowCount());
+  const auto actual_cells = actual->Collection().GetRows();
+  const auto expected_cells = expected->Collection().GetRows();
   for (size_t r = 0; r < expected->RowCount(); r++) {
     for (size_t c = 0; c < expected->ColumnCount(); c++) {
       INFO("row " << r << " col " << c);
-      REQUIRE(actual->GetValue(c, r).ToString() ==
-              expected->GetValue(c, r).ToString());
+      REQUIRE(actual_cells.GetValue(c, r).ToString() ==
+              expected_cells.GetValue(c, r).ToString());
     }
   }
 }
@@ -136,7 +138,7 @@ TEST_CASE("dbsp_use_planner stays callable and always reports ENABLED",
                            "dbsp_use_planner(true)"}) {
     auto status = db.query(std::string("SELECT * FROM ") + call);
     REQUIRE_FALSE(status->HasError());
-    REQUIRE(status->GetValue(0, 0).ToString().find("ENABLED") !=
+    REQUIRE(status->Collection().GetValue(0, 0).ToString().find("ENABLED") !=
             std::string::npos);
   }
 }
@@ -471,8 +473,9 @@ std::vector<int64_t> scanColumn0(DuckDBTestHarness &db,
   auto result = db.query("SELECT * FROM dbsp_query('" + view + "')");
   REQUIRE_FALSE(result->HasError());
   std::vector<int64_t> out;
+  const auto result_cells = result->Collection().GetRows();
   for (size_t r = 0; r < result->RowCount(); r++) {
-    out.push_back(result->GetValue(0, r).GetValue<int64_t>());
+    out.push_back(result_cells.GetValue(0, r).GetValue<int64_t>());
   }
   return out;
 }
@@ -574,7 +577,7 @@ TEST_CASE("planner C1: percentage LIMIT is not planner-built",
   auto expected = db.query("SELECT COUNT(*) FROM (SELECT id FROM pt "
                            "LIMIT 50%)");
   auto actual = db.query("SELECT COUNT(*) FROM dbsp_query('v_pct')");
-  REQUIRE(actual->GetValue(0, 0) == expected->GetValue(0, 0));
+  REQUIRE(actual->Collection().GetValue(0, 0) == expected->Collection().GetValue(0, 0));
 }
 
 TEST_CASE("planner C1: ORDER BY + LIMIT differential",
@@ -1322,7 +1325,7 @@ TEST_CASE("planner: parallel level propagation matches sequential",
   // Toggle through the SQL surface so the function is covered too
   auto status = db.query("SELECT * FROM dbsp_parallel(true)");
   REQUIRE_FALSE(status->HasError());
-  REQUIRE(status->GetValue(0, 0).ToString().find("ENABLED") !=
+  REQUIRE(status->Collection().GetValue(0, 0).ToString().find("ENABLED") !=
           std::string::npos);
 
   // Four sibling views (one level, stepped concurrently) plus a diamond
@@ -1563,7 +1566,7 @@ TEST_CASE("planner K1: spill mode differential across view shapes",
   setupTableU(db);
   auto status = db.query("SELECT * FROM dbsp_spill(true)");
   REQUIRE_FALSE(status->HasError());
-  REQUIRE(status->GetValue(0, 0).ToString().find("ENABLED") !=
+  REQUIRE(status->Collection().GetValue(0, 0).ToString().find("ENABLED") !=
           std::string::npos);
   auto &mgr = db.manager();
   REQUIRE(mgr.spill_enabled());
@@ -1813,7 +1816,7 @@ TEST_CASE("planner L2: sharded probe passes match serial",
     auto expected = db.query("SELECT COUNT(*) FROM (" + sql + ")");
     auto actual =
         db.query("SELECT COUNT(*) FROM dbsp_query('v_shard')");
-    REQUIRE(actual->GetValue(0, 0) == expected->GetValue(0, 0));
+    REQUIRE(actual->Collection().GetValue(0, 0) == expected->Collection().GetValue(0, 0));
   }
   requireViewMatchesQuery(db, "v_shard", sql);
   db.exec("SELECT * FROM dbsp_parallel(false)");

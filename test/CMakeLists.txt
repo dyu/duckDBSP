@@ -21,6 +21,8 @@ set(ENABLE_UBSAN OFF CACHE BOOL "" FORCE)
 if(NOT TARGET duckdb_static)
     add_subdirectory(${DUCKDB_SOURCE_DIR} duckdb EXCLUDE_FROM_ALL)
 endif()
+# DuckDB 2.0.0: duckdb_link_extensions() finds its loader template through this
+set(DUCKDB_MODULE_BASE_DIR "${DUCKDB_SOURCE_DIR}")
 
 # Include directories
 include_directories(
@@ -44,9 +46,8 @@ add_library(catch2_main STATIC catch2_main.cpp)
 function(add_dbsp_test TEST_NAME)
     set(TEST_TARGET test_${TEST_NAME})
     add_executable(${TEST_TARGET} ${ARGN})
-    target_link_libraries(${TEST_TARGET} catch2_main duckdb_static
-                          duckdb_generated_extension_loader
-                          core_functions_extension parquet_extension)
+    target_link_libraries(${TEST_TARGET} catch2_main duckdb_static)
+    duckdb_link_extensions(${TEST_TARGET} core_functions parquet)
     add_test(NAME ${TEST_NAME} COMMAND ${TEST_TARGET})
 endfunction()
 
@@ -81,9 +82,8 @@ function(add_dbsp_integration_test TEST_NAME SOURCE)
         ${CMAKE_CURRENT_SOURCE_DIR}/../src/dbsp_recovery.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/../src/dbsp_crash_marker.cpp
     )
-    target_link_libraries(${TEST_TARGET} catch2_main duckdb_static
-                          duckdb_generated_extension_loader
-                          core_functions_extension parquet_extension)
+    target_link_libraries(${TEST_TARGET} catch2_main duckdb_static)
+    duckdb_link_extensions(${TEST_TARGET} core_functions parquet)
     add_test(NAME ${TEST_NAME} COMMAND ${TEST_TARGET})
 endfunction()
 
@@ -121,9 +121,8 @@ add_executable(bench_planner_eval
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/dbsp_extension.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/dbsp_recovery.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/dbsp_crash_marker.cpp)
-target_link_libraries(bench_planner_eval catch2_main duckdb_static
-                      duckdb_generated_extension_loader
-                      core_functions_extension parquet_extension)
+target_link_libraries(bench_planner_eval catch2_main duckdb_static)
+duckdb_link_extensions(bench_planner_eval core_functions parquet)
 # Correctness gate (in ctest): the [planner_eval]/[shard_bench] cases assert
 # result sizes, so an API drift that empties results (e.g. source-name
 # qualification: apply_changes routes only on an exact source_table_ match)
@@ -138,9 +137,8 @@ add_executable(bench_window
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/dbsp_extension.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/dbsp_recovery.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/dbsp_crash_marker.cpp)
-target_link_libraries(bench_window catch2_main duckdb_static
-                      duckdb_generated_extension_loader
-                      core_functions_extension parquet_extension)
+target_link_libraries(bench_window catch2_main duckdb_static)
+duckdb_link_extensions(bench_window core_functions parquet)
 add_test(NAME window_bench COMMAND bench_window "[window_bench]")
 
 # Data-plane micro-benchmarks (run manually: ./bench_dataplane)
@@ -149,9 +147,8 @@ add_executable(bench_dataplane
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/dbsp_extension.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/dbsp_recovery.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/dbsp_crash_marker.cpp)
-target_link_libraries(bench_dataplane catch2_main duckdb_static
-                      duckdb_generated_extension_loader
-                      core_functions_extension parquet_extension)
+target_link_libraries(bench_dataplane catch2_main duckdb_static)
+duckdb_link_extensions(bench_dataplane core_functions parquet)
 
 # Extended soak (not part of ctest; run manually, SOAK_ROUNDS env to size)
 add_executable(soak_differential
@@ -159,6 +156,5 @@ add_executable(soak_differential
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/dbsp_extension.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/dbsp_recovery.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/dbsp_crash_marker.cpp)
-target_link_libraries(soak_differential catch2_main duckdb_static
-                      duckdb_generated_extension_loader
-                      core_functions_extension parquet_extension)
+target_link_libraries(soak_differential catch2_main duckdb_static)
+duckdb_link_extensions(soak_differential core_functions parquet)

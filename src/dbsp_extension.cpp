@@ -2749,7 +2749,7 @@ static void LoadInternal(ExtensionLoader &loader) {
                                  {LogicalType::VARCHAR, LogicalType::VARCHAR},
                                  CreateViewFunc, CreateViewBind);
   // Optional args for simple mode
-  create_view_func.varargs = LogicalType::ANY;
+  create_view_func.GetSignature().AddArgs("args", LogicalType::ANY);
   loader.RegisterFunction(create_view_func);
 
   TableFunction replace_view_func("dbsp_replace_view",
@@ -2795,16 +2795,16 @@ static void LoadInternal(ExtensionLoader &loader) {
 
   TableFunction insert_func("dbsp_notify_insert", {LogicalType::VARCHAR},
                             NotifyInsertFunc, NotifyBind);
-  insert_func.varargs = LogicalType::ANY; // For column values
+  insert_func.GetSignature().AddArgs("args", LogicalType::ANY); // For column values
   loader.RegisterFunction(insert_func);
 
   TableFunction delete_func("dbsp_notify_delete", {LogicalType::VARCHAR},
                             NotifyDeleteFunc, NotifyBind);
-  delete_func.varargs = LogicalType::ANY; // For column values
+  delete_func.GetSignature().AddArgs("args", LogicalType::ANY); // For column values
   loader.RegisterFunction(delete_func);
 
   TableFunction sync_func("dbsp_sync", {}, SyncFunc, SyncBind);
-  sync_func.varargs = LogicalType::VARCHAR; // Optional table name
+  sync_func.GetSignature().AddArgs("args", LogicalType::VARCHAR); // Optional table name
   loader.RegisterFunction(sync_func);
 
   TableFunction query_func("dbsp_query", {LogicalType::VARCHAR}, QueryFunc,
@@ -2859,48 +2859,50 @@ static void LoadInternal(ExtensionLoader &loader) {
   loader.RegisterFunction(set_view_key_func);
 
   TableFunction save_func("dbsp_save", {}, SaveFunc, SaveBind);
-  save_func.varargs = LogicalType::VARCHAR;
-  save_func.named_parameters["catalog"] = LogicalType::VARCHAR;
+  save_func.GetSignature().AddArgs("args", LogicalType::VARCHAR);
+  save_func.GetSignature().WithTypedKwargs(
+      "kwargs", [](TypedKwargs &o) { o.Add("catalog", LogicalType::VARCHAR); });
   loader.RegisterFunction(save_func);
 
   TableFunction load_func("dbsp_load", {}, LoadFunc, LoadBind);
-  load_func.varargs = LogicalType::VARCHAR;
-  load_func.named_parameters["catalog"] = LogicalType::VARCHAR;
+  load_func.GetSignature().AddArgs("args", LogicalType::VARCHAR);
+  load_func.GetSignature().WithTypedKwargs(
+      "kwargs", [](TypedKwargs &o) { o.Add("catalog", LogicalType::VARCHAR); });
   loader.RegisterFunction(load_func);
 
   TableFunction auto_sync_func("dbsp_auto_sync", {}, AutoSyncFunc,
                                AutoSyncBind);
-  auto_sync_func.varargs = LogicalType::BOOLEAN;
+  auto_sync_func.GetSignature().AddArgs("args", LogicalType::BOOLEAN);
   loader.RegisterFunction(auto_sync_func);
 
   TableFunction autopersist_func("dbsp_autopersist", {}, AutoPersistFunc,
                                  AutoPersistBind);
-  autopersist_func.varargs = LogicalType::BOOLEAN;
+  autopersist_func.GetSignature().AddArgs("args", LogicalType::BOOLEAN);
   loader.RegisterFunction(autopersist_func);
 
   TableFunction autopersist_interval_func("dbsp_autopersist_interval", {},
                                           AutoPersistIntervalFunc,
                                           AutoPersistIntervalBind);
-  autopersist_interval_func.varargs = LogicalType::BIGINT;
+  autopersist_interval_func.GetSignature().AddArgs("args", LogicalType::BIGINT);
   loader.RegisterFunction(autopersist_interval_func);
 
   TableFunction lazy_restore_func("dbsp_lazy_restore", {}, LazyRestoreFunc,
                                   LazyRestoreBind);
-  lazy_restore_func.varargs = LogicalType::BOOLEAN;
+  lazy_restore_func.GetSignature().AddArgs("args", LogicalType::BOOLEAN);
   loader.RegisterFunction(lazy_restore_func);
 
   TableFunction use_planner_func("dbsp_use_planner", {}, UsePlannerFunc,
                                  UsePlannerBind);
-  use_planner_func.varargs = LogicalType::BOOLEAN;
+  use_planner_func.GetSignature().AddArgs("args", LogicalType::BOOLEAN);
   loader.RegisterFunction(use_planner_func);
 
   TableFunction parallel_func("dbsp_parallel", {}, ParallelFunc,
                               ParallelBind);
-  parallel_func.varargs = LogicalType::BOOLEAN;
+  parallel_func.GetSignature().AddArgs("args", LogicalType::BOOLEAN);
   loader.RegisterFunction(parallel_func);
 
   TableFunction spill_func("dbsp_spill", {}, SpillFunc, SpillBind);
-  spill_func.varargs = LogicalType::BOOLEAN;
+  spill_func.GetSignature().AddArgs("args", LogicalType::BOOLEAN);
   loader.RegisterFunction(spill_func);
 
   // Register scalar functions

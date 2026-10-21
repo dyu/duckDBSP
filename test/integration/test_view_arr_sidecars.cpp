@@ -74,7 +74,7 @@ public:
         return dbsp_native::get_cdc_manager(*db_->instance);
     }
 
-    unique_ptr<MaterializedQueryResult> query(const std::string &sql) {
+    unique_ptr<QueryResult> query(const std::string &sql) {
         return conn_->Query(sql);
     }
 

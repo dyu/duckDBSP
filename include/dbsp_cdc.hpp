@@ -125,19 +125,27 @@ struct DbspScopeTimer {
 // (measured: `view 10.0 / sql 13.0`, then `14.0 / 17.0`).
 //
 // DuckDB's transaction manager publishes exactly the two numbers needed to
-// bound that window: `LowestActiveStart()` (the smallest start timestamp among
-// the catalog's ACTIVE transactions, and a value larger than any real start
-// once none are left) and, through a transaction started on the spot, a start
-// timestamp NEWER than every transaction currently active. A table seeded
-// while an older transaction was open is marked PROVISIONAL with the second
-// number as its watermark; the watermark has cleared once `LowestActiveStart()`
+// bound that window: `LowestVisibilityBound()` (the smallest start timestamp
+// among the catalog's ACTIVE transactions, and a value larger than any real
+// start once none are left) and, through a transaction started on the spot, a
+// start timestamp NEWER than every transaction currently active. A table
+// seeded while an older transaction was open is marked PROVISIONAL with the
+// second number as its watermark; the watermark has cleared once the bound
 // has risen to it, which means every transaction that existed at seed time has
 // ended.
 //
+// DuckDB 2.0.0 replaced the alpha's numeric `LowestActiveStart()` with an
+// opaque `VisibilityBound` that only compares. Its value is the same number in
+// every state: each transaction's bound is `Before(start_time)`, the minimum is
+// taken over the active set, an emptied set rests at `AllCommitted()`
+// (TRANSACTION_ID_START, the alpha's value too) and a never-used manager at
+// `IncludingUncommitted()` (MAX_TRANSACTION_ID, likewise).
+//
 // The transaction manager is DuckDB's own; an attached catalog served by an
-// extension (`IsDuckTransactionManager()` false) has no such watermark. Both
-// helpers return 0 there, which every caller reads as "no watermark to take",
-// leaving behaviour on those catalogs exactly as it was.
+// extension (`IsDuckTransactionManager()` false) has no such watermark.
+// `no_active_start_before` answers true and the probe returns 0 there, which
+// every caller reads as "no watermark to take", leaving behaviour on those
+// catalogs exactly as it was.
 
 // The attached database holding a canonical `catalog.schema.table` key, or
 // nullptr.
@@ -167,15 +175,51 @@ attached_of_table_key(duckdb::ClientContext &context, const std::string &key) {
   }
 }
 
-// The database's lowest active start timestamp, or 0 when it has no DuckDB
-// transaction manager.
-inline uint64_t lowest_active_start(duckdb::AttachedDatabase &attached) {
+// Whether every transaction active on `attached` started at or after `start`
+// (the alpha's `LowestActiveStart() >= start`). True when the database has no
+// DuckDB transaction manager. The bound only offers `<`, `>=` and `==`, so the
+// test is `min(bound, Before(start)) == Before(start)`, i.e. bound >= start.
+inline bool no_active_start_before(duckdb::AttachedDatabase &attached,
+                                   uint64_t start) {
   auto &tm = duckdb::TransactionManager::Get(attached);
   if (!tm.IsDuckTransactionManager()) {
-    return 0;
+    return true;
   }
-  return static_cast<uint64_t>(
-      duckdb::DuckTransactionManager::Get(attached).LowestActiveStart());
+  const auto lowest =
+      duckdb::DuckTransactionManager::Get(attached).LowestVisibilityBound();
+  const auto mine = duckdb::VisibilityBound::Before(start);
+  return duckdb::VisibilityBound::Min(lowest, mine) == mine;
+}
+
+// Whether `attached` has no active transaction at all. An emptied active set
+// rests at `AllCommitted()` and a never-used manager at
+// `IncludingUncommitted()`; any live transaction's bound is `Before(start)`
+// with start < TRANSACTION_ID_START, so it equals neither.
+inline bool no_active_transaction(duckdb::AttachedDatabase &attached) {
+  const auto lowest =
+      duckdb::DuckTransactionManager::Get(attached).LowestVisibilityBound();
+  return lowest == duckdb::VisibilityBound::AllCommitted() ||
+         lowest == duckdb::VisibilityBound::IncludingUncommitted();
+}
+
+// The numeric value of `attached`'s lowest visibility bound, for debug output
+// only (DBSP_DEBUG_SEED). The bound exposes no accessor, only
+// `timestamp < bound`, so this binary-searches the smallest timestamp that is
+// not below it: 64 comparisons.
+inline uint64_t lowest_bound_for_debug(duckdb::AttachedDatabase &attached) {
+  const auto lowest =
+      duckdb::DuckTransactionManager::Get(attached).LowestVisibilityBound();
+  uint64_t lo = 0;
+  uint64_t hi = UINT64_MAX;
+  while (lo < hi) {
+    const uint64_t mid = lo + (hi - lo) / 2;
+    if (mid >= lowest) {
+      hi = mid;
+    } else {
+      lo = mid + 1;
+    }
+  }
+  return lo;
 }
 
 // A start timestamp strictly newer than every transaction active on `attached`
@@ -762,14 +806,18 @@ public:
               if (rows->HasError()) {
                 throw std::runtime_error(rows->GetError());
               }
+              // DuckDB 2.0.0: Collection().GetValue(c, r) materializes every
+              // row on each call, so per-row loops read through one GetRows()
+              // taken up front (here and at every loop below).
+              const auto rows_cells = rows->Collection().GetRows();
               for (duckdb::idx_t i = 0; i < rows->RowCount(); i++) {
                 const auto blob_str =
-                    duckdb::StringValue::Get(rows->GetValue(2, i));
+                    duckdb::StringValue::Get(rows_cells.GetValue(2, i));
                 std::vector<uint8_t> blob(blob_str.begin(), blob_str.end());
-                if (rows->GetValue(0, i).ToString() == "node") {
+                if (rows_cells.GetValue(0, i).ToString() == "node") {
                   ck.nodes.emplace_back(
                       static_cast<uint64_t>(
-                          rows->GetValue(1, i).GetValue<int64_t>()),
+                          rows_cells.GetValue(1, i).GetValue<int64_t>()),
                       std::move(blob));
                 } else {
                   ck.sink = std::move(blob);
@@ -1037,8 +1085,8 @@ public:
             last_error_ = "checkpoint watermark failed for " + t;
             return false;
           }
-          wm_count = wm->GetValue(0, 0).GetValue<int64_t>();
-          wm_hash = wm->GetValue(1, 0).ToString();
+          wm_count = wm->Collection().GetValue(0, 0).GetValue<int64_t>();
+          wm_hash = wm->Collection().GetValue(1, 0).ToString();
           if (tt != nullptr) {
             tt->wm_store(wm_count, wm_hash);
           }
@@ -1339,7 +1387,7 @@ public:
       }
       auto ver = con.Query("SELECT version FROM " + ckpt_ver_tbl);
       if (ver->HasError() || ver->RowCount() != 1 ||
-          ver->GetValue(0, 0).GetValue<int64_t>() !=
+          ver->Collection().GetValue(0, 0).GetValue<int64_t>() !=
               dbsp_native::kDbspCkptFormatVersion) {
         return false; // version mismatch: discard, rebuild by replay
       }
@@ -1348,16 +1396,17 @@ public:
       if (meta->HasError()) {
         return false;
       }
+      const auto meta_cells = meta->Collection().GetRows();
       for (duckdb::idx_t i = 0; i < meta->RowCount(); i++) {
-        const std::string t = meta->GetValue(0, i).ToString();
+        const std::string t = meta_cells.GetValue(0, i).ToString();
         // Shadow-proof alias — see save_checkpoint's watermark loop.
         auto live = con.Query("SELECT COUNT(*), CAST(bit_xor(hash("
                               "__dbsp_wm_row)) AS VARCHAR) FROM " +
                               quote_table_key(t) + " __dbsp_wm_row");
         if (live->HasError() || live->RowCount() != 1 ||
-            live->GetValue(0, 0) != meta->GetValue(1, i) ||
-            live->GetValue(1, 0).ToString() !=
-                meta->GetValue(2, i).ToString()) {
+            live->Collection().GetValue(0, 0) != meta_cells.GetValue(1, i) ||
+            live->Collection().GetValue(1, 0).ToString() !=
+                meta_cells.GetValue(2, i).ToString()) {
           // O(delta) recovery increment A: the table changed (or vanished)
           // since the save. Don't discard the whole checkpoint — record
           // the table as stale; the loader cold-replays only views whose
@@ -1365,8 +1414,8 @@ public:
           out.stale_tables.insert(t);
           continue;
         }
-        out.watermarks[t] = {meta->GetValue(1, i).GetValue<int64_t>(),
-                             meta->GetValue(2, i).ToString()};
+        out.watermarks[t] = {meta_cells.GetValue(1, i).GetValue<int64_t>(),
+                             meta_cells.GetValue(2, i).ToString()};
       }
       // View-arrangement sidecar identity (kind='saveid'; design note at
       // save_checkpoint's sidecar loop). A missing row — pre-feature
@@ -1374,8 +1423,8 @@ public:
       auto sid = con.Query("SELECT node_id, data FROM " + ckpt_tbl +
                            " WHERE kind = 'saveid'");
       if (!sid->HasError() && sid->RowCount() == 1) {
-        out.view_arr_seq = sid->GetValue(0, 0).GetValue<int64_t>();
-        out.view_arr_id = duckdb::StringValue::Get(sid->GetValue(1, 0));
+        out.view_arr_seq = sid->Collection().GetValue(0, 0).GetValue<int64_t>();
+        out.view_arr_id = duckdb::StringValue::Get(sid->Collection().GetValue(1, 0));
       }
       // Phase 3 (reattach): on a disk-backed database (mv tables present,
       // marked earlier in load_from_duck_table) operator blobs run to GBs
@@ -1390,11 +1439,12 @@ public:
         if (rows->HasError()) {
           return false;
         }
+        const auto rows_cells = rows->Collection().GetRows();
         for (duckdb::idx_t i = 0; i < rows->RowCount(); i++) {
-          const std::string kind = rows->GetValue(0, i).ToString();
-          const std::string name = rows->GetValue(1, i).ToString();
+          const std::string kind = rows_cells.GetValue(0, i).ToString();
+          const std::string name = rows_cells.GetValue(1, i).ToString();
           const auto node_id =
-              static_cast<uint64_t>(rows->GetValue(2, i).GetValue<int64_t>());
+              static_cast<uint64_t>(rows_cells.GetValue(2, i).GetValue<int64_t>());
           if (kind == "node") {
             out.nodes[name][node_id] = {};
           } else {
@@ -1406,9 +1456,10 @@ public:
         if (fps->HasError()) {
           return false;
         }
+        const auto fps_cells = fps->Collection().GetRows();
         for (duckdb::idx_t i = 0; i < fps->RowCount(); i++) {
-          out.sql_fingerprints[fps->GetValue(0, i).ToString()] =
-              duckdb::StringValue::Get(fps->GetValue(1, i));
+          out.sql_fingerprints[fps_cells.GetValue(0, i).ToString()] =
+              duckdb::StringValue::Get(fps_cells.GetValue(1, i));
         }
         return !out.sinks.empty();
       }
@@ -1416,13 +1467,14 @@ public:
       if (rows->HasError()) {
         return false;
       }
+      const auto rows_cells = rows->Collection().GetRows();
       for (duckdb::idx_t i = 0; i < rows->RowCount(); i++) {
-        const std::string kind = rows->GetValue(0, i).ToString();
-        const std::string name = rows->GetValue(1, i).ToString();
+        const std::string kind = rows_cells.GetValue(0, i).ToString();
+        const std::string name = rows_cells.GetValue(1, i).ToString();
         const auto node_id =
-            static_cast<uint64_t>(rows->GetValue(2, i).GetValue<int64_t>());
+            static_cast<uint64_t>(rows_cells.GetValue(2, i).GetValue<int64_t>());
         const auto blob_str =
-            duckdb::StringValue::Get(rows->GetValue(3, i));
+            duckdb::StringValue::Get(rows_cells.GetValue(3, i));
         std::vector<uint8_t> blob(blob_str.begin(), blob_str.end());
         if (kind == "node") {
           out.nodes[name][node_id] = std::move(blob);
@@ -1691,12 +1743,13 @@ public:
       if (rows->HasError()) {
         throw std::runtime_error(rows->GetError());
       }
+      const auto rows_cells = rows->Collection().GetRows();
       for (duckdb::idx_t i = 0; i < rows->RowCount(); i++) {
-        const auto blob_str = duckdb::StringValue::Get(rows->GetValue(2, i));
+        const auto blob_str = duckdb::StringValue::Get(rows_cells.GetValue(2, i));
         std::vector<uint8_t> blob(blob_str.begin(), blob_str.end());
-        if (rows->GetValue(0, i).ToString() == "node") {
+        if (rows_cells.GetValue(0, i).ToString() == "node") {
           pv.nodes[static_cast<uint64_t>(
-              rows->GetValue(1, i).GetValue<int64_t>())] = std::move(blob);
+              rows_cells.GetValue(1, i).GetValue<int64_t>())] = std::move(blob);
         } else {
           pv.sink = std::move(blob);
         }
@@ -2089,15 +2142,16 @@ public:
         last_error_ = res->GetError();
         return false;
       }
+      const auto res_cells = res->Collection().GetRows();
       for (duckdb::idx_t i = 0; i < res->RowCount(); i++) {
         // Use StringValue::Get() for raw VARCHAR content — Value::ToString()
         // escapes characters like " as \x22, which breaks the stored SQL.
-        auto name_val = res->GetValue(0, i);
-        auto sql_val = res->GetValue(1, i);
+        auto name_val = res_cells.GetValue(0, i);
+        auto sql_val = res_cells.GetValue(1, i);
         LoadRow row;
         row.name = duckdb::StringValue::Get(name_val);
         row.sql = duckdb::StringValue::Get(sql_val);
-        auto src_val = res->GetValue(2, i);
+        auto src_val = res_cells.GetValue(2, i);
         if (!src_val.IsNull()) {
           // CSV of resolved source names, written by create_view — same
           // key space as the checkpoint watermarks (stale-closure walk).
@@ -3178,8 +3232,8 @@ public:
                   "VARCHAR) FROM " +
                   quote_table_key(req.table) + " __dbsp_wm_row");
               if (!wm->HasError() && wm->RowCount() == 1) {
-                const int64_t wc = wm->GetValue(0, 0).GetValue<int64_t>();
-                const std::string wh = wm->GetValue(1, 0).ToString();
+                const int64_t wc = wm->Collection().GetValue(0, 0).GetValue<int64_t>();
+                const std::string wh = wm->Collection().GetValue(1, 0).ToString();
                 if (flatpacked::write_flat_index_file(
                         sharr_path(req.fingerprint), req.fingerprint, wc, wh,
                         arr->flat) &&
@@ -3231,7 +3285,7 @@ public:
     if (context) {
       try {
         std::string delete_sql = "DELETE FROM _dbsp_views WHERE name = '" + view_name + "'";
-        auto res = context->Query(delete_sql, false);
+        auto res = context->Query(delete_sql, duckdb::QueryParameters());
         // Ignore errors - persistence is best-effort
       } catch (const std::exception &e) {
         // Ignore persistence errors - logged for debugging
@@ -3275,7 +3329,7 @@ public:
       if (context) {
         try {
           std::string delete_sql = "DELETE FROM _dbsp_views WHERE name = '" + dep + "'";
-          auto res = context->Query(delete_sql, false);
+          auto res = context->Query(delete_sql, duckdb::QueryParameters());
           // Ignore errors - persistence is best-effort
         } catch (...) {
           // Ignore persistence errors
@@ -3295,7 +3349,7 @@ public:
     if (context) {
       try {
         std::string delete_sql = "DELETE FROM _dbsp_views WHERE name = '" + view_name + "'";
-        auto res = context->Query(delete_sql, false);
+        auto res = context->Query(delete_sql, duckdb::QueryParameters());
         // Ignore errors - persistence is best-effort
       } catch (const std::exception &e) {
         // Ignore persistence errors - logged for debugging
@@ -4473,15 +4527,9 @@ public:
       } catch (...) {
         // No live statement transaction (commit-hook sweep): establish only
         // when nobody at all is still active.
-        const uint64_t hook_lowest = static_cast<uint64_t>(
-            duckdb::DuckTransactionManager::Get(*attached)
-                .LowestActiveStart());
-        return hook_lowest ==
-               static_cast<uint64_t>(duckdb::MAX_TRANSACTION_ID);
+        return no_active_transaction(*attached);
       }
-      const uint64_t lowest = static_cast<uint64_t>(
-          duckdb::DuckTransactionManager::Get(*attached).LowestActiveStart());
-      return lowest >= mine;
+      return no_active_start_before(*attached, mine);
     } catch (...) {
       return false;
     }
@@ -4825,7 +4873,7 @@ private:
       auto chk = con.Query("SELECT count(*) FROM " + qt);
       fprintf(stderr, "[mv] write_full %s result=%zu table=%s\n",
               name.c_str(), view.get_result().size(),
-              chk->HasError() ? "ERR" : chk->GetValue(0, 0).ToString().c_str());
+              chk->HasError() ? "ERR" : chk->Collection().GetValue(0, 0).ToString().c_str());
     }
     return mv_meta_upsert(con, name);
   }
@@ -5684,17 +5732,27 @@ private:
     // Streaming execution (H5): rows are consumed chunk by chunk below,
     // so materializing the whole table into a QueryResult first was one
     // extra full-table copy per sync
-    auto sql_result =
-        fresh_con.SendQuery("SELECT * FROM " + quote_table_key(table_key));
-    if (!sql_result || sql_result->HasError()) {
+    auto submitted =
+        fresh_con.Submit("SELECT * FROM " + quote_table_key(table_key));
+    if (!submitted || submitted->HasError()) {
       throw std::runtime_error(
           "Failed to scan table '" + table_key + "': " +
-          (sql_result ? sql_result->GetError() : "null result"));
+          (submitted ? submitted->GetError() : "null result"));
     }
+    auto sql_result =
+        duckdb::make_uniq<duckdb::QueryResultStream<>>(std::move(submitted));
     int64_t total = 0;
     while (true) {
       auto chunk_ptr = sql_result->Fetch();
-      if (!chunk_ptr || chunk_ptr->size() == 0) break;
+      if (!chunk_ptr || chunk_ptr->size() == 0) {
+        // Fetch returns null on an execution error as well as at the end;
+        // a truncated scan must not pass for the whole table.
+        if (sql_result->HasError()) {
+          throw std::runtime_error("Failed to scan table '" + table_key +
+                                   "': " + sql_result->GetError());
+        }
+        break;
+      }
       auto &chunk = *chunk_ptr;
       // Typed column extraction: flatten once, read vector data
       // directly for common types instead of boxing every cell
@@ -5792,8 +5850,8 @@ private:
       if (wm->HasError() || wm->RowCount() != 1) {
         return false;
       }
-      count = wm->GetValue(0, 0).GetValue<int64_t>();
-      hash = wm->GetValue(1, 0).ToString();
+      count = wm->Collection().GetValue(0, 0).GetValue<int64_t>();
+      hash = wm->Collection().GetValue(1, 0).ToString();
       return true;
     } catch (...) {
       return false;
@@ -6277,7 +6335,7 @@ private:
   //               active on the catalog RIGHT NOW (`probe_new_start_timestamp`,
   //               which mints one by opening and rolling back a probe
   //               transaction — the manager's counter is not publicly
-  //               readable). `lowest_active_start >= watermark` is exactly
+  //               readable). `no_active_start_before(watermark)` is exactly
   //               "every transaction that was open at tracking time has
   //               ended". That INCLUDES a concurrent writer that started after
   //               the deferring transaction but before the track: its
@@ -6371,14 +6429,15 @@ private:
   // every transaction alive right now. TrackedTable::mark_provisional explains
   // what the flag costs and what retires it.
   //
-  // "Older than this one" is what `LowestActiveStart() < my start` says, and it
+  // "Older than this one" is what `LowestVisibilityBound() < my start` says
+  // (the 2.0 alpha's `LowestActiveStart()`, same number), and it
   // is the shape that produced the defect. A transaction that begins DURING
   // this seeding statement is not covered here — its writes to a still-
   // untriggered table are the trigger-install window, which the sweep already
   // answers by marking that transaction's own commit untrusted
   // (`capture_.triggers_installed` → scan).
   //
-  // Cost when nothing else is open: `LowestActiveStart()` is this transaction's
+  // Cost when nothing else is open: the lowest bound is this transaction's
   // own start, the comparison is false, and the table is never provisional —
   // no extra scan, ever. That is the ordinary single-writer case.
   // The reference is the CALLER'S OWN transaction start, and it has to be:
@@ -6398,13 +6457,13 @@ private:
       if (!attached) {
         return;
       }
-      const uint64_t lowest = lowest_active_start(*attached);
-      if (lowest == 0) {
+      if (!duckdb::TransactionManager::Get(*attached)
+               .IsDuckTransactionManager()) {
         return; // catalog has no DuckDB transaction manager
       }
       const uint64_t mine = static_cast<uint64_t>(
           duckdb::DuckTransaction::Get(context, *attached).start_time);
-      if (lowest >= mine) {
+      if (no_active_start_before(*attached, mine)) {
         return; // nothing older than this transaction is open
       }
       const uint64_t watermark = probe_new_start_timestamp(context, *attached);
@@ -6417,7 +6476,8 @@ private:
       table.mark_provisional(watermark);
       if (std::getenv("DBSP_DEBUG_SEED")) {
         std::cerr << "[dbsp] provisional " << table_name
-                  << " lowest_active_start=" << lowest << " mine=" << mine
+                  << " lowest=" << lowest_bound_for_debug(*attached)
+                  << " mine=" << mine
                   << " watermark=" << watermark << "\n";
       }
     } catch (const std::exception &e) {
@@ -6555,13 +6615,17 @@ private:
       if (!attached) {
         return false;
       }
-      const uint64_t lowest = lowest_active_start(*attached);
+      const bool cleared = no_active_start_before(*attached, watermark);
       if (std::getenv("DBSP_DEBUG_SEED")) {
         std::cerr << "[dbsp] watermark check " << table_name
-                  << " lowest=" << lowest << " watermark=" << watermark
-                  << "\n";
+                  << " cleared=" << cleared << " watermark=" << watermark;
+        if (duckdb::TransactionManager::Get(*attached)
+                .IsDuckTransactionManager()) {
+          std::cerr << " lowest=" << lowest_bound_for_debug(*attached);
+        }
+        std::cerr << "\n";
       }
-      return lowest == 0 || lowest >= watermark;
+      return cleared;
     } catch (...) {
       return false;
     }
@@ -6699,8 +6763,8 @@ private:
         return;
       }
       DbspScopeTimer t("baseline_fold", table_name);
-      tt.save_spill_index(wm->GetValue(0, 0).GetValue<int64_t>(),
-                          wm->GetValue(1, 0).ToString());
+      tt.save_spill_index(wm->Collection().GetValue(0, 0).GetValue<int64_t>(),
+                          wm->Collection().GetValue(1, 0).ToString());
     } catch (...) {
       // Best-effort: a failed fold just leaves the RAM map in place; the
       // first save folds it as before.
@@ -6729,7 +6793,7 @@ private:
           auto cnt = con.Query("SELECT COUNT(*) FROM " +
                                quote_table_key(table_name));
           if (!cnt->HasError() && cnt->RowCount() == 1 &&
-              static_cast<size_t>(cnt->GetValue(0, 0).GetValue<int64_t>()) >=
+              static_cast<size_t>(cnt->Collection().GetValue(0, 0).GetValue<int64_t>()) >=
                   th) {
             tt.request_spill_now();
           }
@@ -6785,17 +6849,25 @@ private:
     InternalConnection fresh_con_owner(context, policy,
                                   site);
     auto &fresh_con = *fresh_con_owner;
-    auto sql_result =
-        fresh_con.SendQuery("SELECT * FROM " + quote_table_key(table_key));
-    if (!sql_result || sql_result->HasError()) {
+    auto submitted =
+        fresh_con.Submit("SELECT * FROM " + quote_table_key(table_key));
+    if (!submitted || submitted->HasError()) {
       throw std::runtime_error(
           "Failed to scan table '" + table_key + "': " +
-          (sql_result ? sql_result->GetError() : "null result"));
+          (submitted ? submitted->GetError() : "null result"));
     }
+    auto sql_result =
+        duckdb::make_uniq<duckdb::QueryResultStream<>>(std::move(submitted));
     bool first = true;
     while (true) {
       auto chunk_ptr = sql_result->Fetch();
       if (!chunk_ptr || chunk_ptr->size() == 0) {
+        // Fetch returns null on an execution error as well as at the end;
+        // a truncated scan must not pass for the whole table.
+        if (sql_result->HasError()) {
+          throw std::runtime_error("Failed to scan table '" + table_key +
+                                   "': " + sql_result->GetError());
+        }
         break;
       }
       auto &chunk = *chunk_ptr;

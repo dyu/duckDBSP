@@ -626,7 +626,7 @@ private:
         }
       }
     }
-    duckdb::Parser parser;
+    auto parser = duckdb::Parser::GetBuiltinParser();
     try {
       parser.ParseQuery(query);
     } catch (...) {

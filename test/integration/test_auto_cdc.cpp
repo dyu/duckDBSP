@@ -284,10 +284,12 @@ TEST_CASE("exact deltas: randomized explicit-txn churn stays correct",
     REQUIRE_FALSE(expected->HasError());
     REQUIRE_FALSE(actual->HasError());
     REQUIRE(actual->RowCount() == expected->RowCount());
+    const auto actual_cells = actual->Collection().GetRows();
+    const auto expected_cells = expected->Collection().GetRows();
     for (size_t r = 0; r < expected->RowCount(); r++) {
       for (size_t c = 0; c < expected->ColumnCount(); c++) {
-        REQUIRE(actual->GetValue(c, r).ToString() ==
-                expected->GetValue(c, r).ToString());
+        REQUIRE(actual_cells.GetValue(c, r).ToString() ==
+                expected_cells.GetValue(c, r).ToString());
       }
     }
   }
@@ -406,10 +408,12 @@ struct DeltaFixture {
     REQUIRE_FALSE(actual->HasError());
     INFO("view " << view);
     REQUIRE(actual->RowCount() == expected->RowCount());
+    const auto actual_cells = actual->Collection().GetRows();
+    const auto expected_cells = expected->Collection().GetRows();
     for (size_t r = 0; r < expected->RowCount(); r++) {
       for (size_t c = 0; c < expected->ColumnCount(); c++) {
-        REQUIRE(actual->GetValue(c, r).ToString() ==
-                expected->GetValue(c, r).ToString());
+        REQUIRE(actual_cells.GetValue(c, r).ToString() ==
+                expected_cells.GetValue(c, r).ToString());
       }
     }
   }
@@ -679,10 +683,12 @@ TEST_CASE("exact deltas: notify-API replay matches trigger-fed auto-sync",
   REQUIRE_FALSE(c->HasError());
 
   REQUIRE(a->RowCount() == c->RowCount());
+  const auto a_cells = a->Collection().GetRows();
+  const auto c_cells = c->Collection().GetRows();
   for (size_t r = 0; r < a->RowCount(); r++) {
     for (size_t col = 0; col < a->ColumnCount(); col++) {
-      REQUIRE(a->GetValue(col, r).ToString() ==
-              c->GetValue(col, r).ToString());
+      REQUIRE(a_cells.GetValue(col, r).ToString() ==
+              c_cells.GetValue(col, r).ToString());
     }
   }
 }
@@ -826,7 +832,7 @@ TEST_CASE("Appender rows are captured (flush runs as a statement)",
     check();
     auto res = db.query("SELECT val FROM dbsp_query('wv_app') "
                         "WHERE id = 31");
-    REQUIRE(res->GetValue(0, 0).GetValue<int64_t>() == 311);
+    REQUIRE(res->Collection().GetValue(0, 0).GetValue<int64_t>() == 311);
   }
   SECTION("autocommit Appender (no explicit txn): views stay correct") {
     {
@@ -865,7 +871,7 @@ TEST_CASE("dbsp_stats exposes sync-path counters",
                         metric + "'");
     REQUIRE_FALSE(res->HasError());
     REQUIRE(res->RowCount() == 1);
-    return res->GetValue(0, 0).GetValue<int64_t>();
+    return res->Collection().GetValue(0, 0).GetValue<int64_t>();
   };
 
   REQUIRE(value_of("tracked_tables") >= 1);
@@ -883,7 +889,7 @@ TEST_CASE("dbsp_stats exposes sync-path counters",
   // A retired counter must not come back by accident.
   auto gone = db.query("SELECT count(*) FROM dbsp_stats() WHERE metric IN "
                        "('capture_guard_fallbacks', 'delta_source_mode')");
-  REQUIRE(gone->GetValue(0, 0).GetValue<int64_t>() == 0);
+  REQUIRE(gone->Collection().GetValue(0, 0).GetValue<int64_t>() == 0);
 
   db.exec("SELECT * FROM dbsp_auto_sync(false)");
 }

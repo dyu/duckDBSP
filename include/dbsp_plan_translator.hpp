@@ -625,8 +625,8 @@ private:
             // member after the FunctionData base.
             //
             // UNSAFE BY CONSTRUCTION, kept only because it is verified.
-            // The engine is pinned in-tree (currently v2.0.0-alpha39998),
-            // and the layout was re-checked against 2.0's source and
+            // The engine is pinned in-tree (currently v2.0.0), and the
+            // layout was re-checked against v2.0.0's source and
             // re-verified empirically by the differential sweep
             // (`string_agg(v, '-' ORDER BY v)` byte-identical to plain
             // SQL). Neither of those is a guarantee: nothing here fails to
@@ -1488,7 +1488,7 @@ private:
     SpecPtr visit_get(duckdb::LogicalGet &op) {
       auto table_entry = op.GetTable();
       if (!table_entry) {
-        return unsupported("non-table scan (" + op.function.name + ")");
+        return unsupported("non-table scan (" + op.function.GetName() + ")");
       }
       if (op.table_filters.HasFilters()) {
         return unsupported("GET with pushed-down table filters");

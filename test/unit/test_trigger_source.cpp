@@ -43,14 +43,14 @@ double view_sum(DuckDBTestHarness &db, const std::string &view) {
 double sql_sum(DuckDBTestHarness &db, const std::string &sql) {
   auto r = db.query(sql);
   REQUIRE_FALSE(r->HasError());
-  auto v = r->GetValue(0, 0);
+  auto v = r->Collection().GetValue(0, 0);
   return v.IsNull() ? 0.0 : v.GetValue<double>();
 }
 
 int64_t sql_count(DuckDBTestHarness &db, const std::string &sql) {
   auto r = db.query(sql);
   REQUIRE_FALSE(r->HasError());
-  return r->GetValue(0, 0).GetValue<int64_t>();
+  return r->Collection().GetValue(0, 0).GetValue<int64_t>();
 }
 
 int64_t view_count(DuckDBTestHarness &db, const std::string &view) {
@@ -368,7 +368,7 @@ TEST_CASE("trigger source: untracked tables are ignored", "[trigger_source]") {
   // Only the tracked table carries triggers.
   auto trg = db.query("SELECT count(*) FROM duckdb_triggers()");
   REQUIRE_FALSE(trg->HasError());
-  REQUIRE(trg->GetValue(0, 0).GetValue<int64_t>() == 3);
+  REQUIRE(trg->Collection().GetValue(0, 0).GetValue<int64_t>() == 3);
 
   db.exec("INSERT INTO untracked VALUES (1, 100.0)");
   db.exec("INSERT INTO tracked VALUES (1, 2.0)");
@@ -842,7 +842,7 @@ TEST_CASE("trigger source: bodies lost without a fingerprint change come back",
     auto names = db.query("SELECT trigger_name FROM duckdb_triggers() "
                           "WHERE trigger_name LIKE '%\\_del' ESCAPE '\\'");
     REQUIRE(names->RowCount() == 1);
-    db.exec("DROP TRIGGER " + names->GetValue(0, 0).ToString() + " ON t");
+    db.exec("DROP TRIGGER " + names->Collection().GetValue(0, 0).ToString() + " ON t");
     REQUIRE(sql_count(db, "SELECT count(*) FROM duckdb_triggers()") == 2);
 
     db.exec("SELECT 1"); // the sweep sees the catalog version moved
@@ -934,7 +934,7 @@ TEST_CASE("trigger source: a racing sink CREATE does not fail the statement",
   INFO("sweep under a racing creator: "
        << (res->HasError() ? res->GetError() : std::string("ok")));
   REQUIRE_FALSE(res->HasError());
-  REQUIRE(res->GetValue(0, 0).GetValue<int64_t>() == 42);
+  REQUIRE(res->Collection().GetValue(0, 0).GetValue<int64_t>() == 42);
 
   // Deferred, not abandoned: once the blocker lets go, the next statement
   // installs and the source works.
@@ -1384,16 +1384,16 @@ TEST_CASE("cdc: a provisional baseline retires under the strict internal-query "
   auto sql = b.Query("SELECT SUM(v) FROM t");
   REQUIRE_FALSE(view->HasError());
   REQUIRE_FALSE(sql->HasError());
-  REQUIRE(view->GetValue(0, 0).GetValue<double>() ==
-          sql->GetValue(0, 0).GetValue<double>()); // 17.0, not 14.0
+  REQUIRE(view->Collection().GetValue(0, 0).GetValue<double>() ==
+          sql->Collection().GetValue(0, 0).GetValue<double>()); // 17.0, not 14.0
 
   // And it stays exact through a later edit on each connection.
   db.exec("INSERT INTO t VALUES (4, 5.0)");
   REQUIRE(view_sum(db, "tv") == sql_sum(db, "SELECT SUM(v) FROM t"));
   REQUIRE_FALSE(b.Query("INSERT INTO t VALUES (5, 6.0)")->HasError());
-  REQUIRE(b.Query("SELECT * FROM dbsp_query('tv')")->GetValue(0, 0)
+  REQUIRE(b.Query("SELECT * FROM dbsp_query('tv')")->Collection().GetValue(0, 0)
               .GetValue<double>() ==
-          b.Query("SELECT SUM(v) FROM t")->GetValue(0, 0).GetValue<double>());
+          b.Query("SELECT SUM(v) FROM t")->Collection().GetValue(0, 0).GetValue<double>());
 }
 
 TEST_CASE("cdc: an unseeded baseline is never served to another connection",
@@ -1439,7 +1439,7 @@ TEST_CASE("cdc: an unseeded baseline is never served to another connection",
     auto r = c.Query(sql);
     INFO("query failed: " << (r->HasError() ? r->GetError() : std::string()));
     REQUIRE_FALSE(r->HasError());
-    auto v = r->GetValue(0, 0);
+    auto v = r->Collection().GetValue(0, 0);
     return v.IsNull() ? 0.0 : v.GetValue<double>();
   };
   // Separate readers, so a failure prints the two NUMBERS (100.0 == 110.0)
@@ -1609,9 +1609,9 @@ TEST_CASE("cdc: one baseline state drives both the apply path and the read "
 
   // READ: served, and equal to plain SQL on both connections.
   REQUIRE(view_sum(db, "tv") == sql_sum(db, "SELECT SUM(v) FROM t"));
-  REQUIRE(b.Query("SELECT * FROM dbsp_query('tv')")->GetValue(0, 0)
+  REQUIRE(b.Query("SELECT * FROM dbsp_query('tv')")->Collection().GetValue(0, 0)
               .GetValue<double>() ==
-          b.Query("SELECT SUM(v) FROM t")->GetValue(0, 0).GetValue<double>());
+          b.Query("SELECT SUM(v) FROM t")->Collection().GetValue(0, 0).GetValue<double>());
 
   // APPLY: the very next write is served exactly, with no scan at all.
   const auto exact_seeded = db.manager().exact_delta_syncs();

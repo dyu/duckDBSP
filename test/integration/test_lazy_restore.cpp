@@ -134,7 +134,7 @@ TEST_CASE("lazy restore: first touch decodes only that view's chain",
 
     auto load_result = db.query("SELECT * FROM dbsp_load()");
     REQUIRE_FALSE(load_result->HasError());
-    const std::string load_msg = load_result->GetValue(0, 0).ToString();
+    const std::string load_msg = load_result->Collection().GetValue(0, 0).ToString();
     REQUIRE(load_msg.find("3 from checkpoint") != std::string::npos);
     REQUIRE(load_msg.find("3 pending lazy restore") != std::string::npos);
 
@@ -240,7 +240,7 @@ TEST_CASE("lazy restore: save after partial realization round-trips",
     const size_t decodes_before_save = dbsp_native::g_lazy_view_decodes.load();
     auto save_result = db.query("SELECT * FROM dbsp_save()");
     REQUIRE_FALSE(save_result->HasError());
-    const std::string save_msg = save_result->GetValue(0, 0).ToString();
+    const std::string save_msg = save_result->Collection().GetValue(0, 0).ToString();
     REQUIRE(save_msg.find("circuit checkpoint: 2 views") != std::string::npos);
     // Re-saving must not have decoded v_filt's stash.
     REQUIRE(dbsp_native::g_lazy_view_decodes.load() == decodes_before_save);
@@ -250,7 +250,7 @@ TEST_CASE("lazy restore: save after partial realization round-trips",
     REQUIRE_FALSE(db.query("SELECT dbsp_drop('v_filt')")->HasError());
     auto load_result = db.query("SELECT * FROM dbsp_load()");
     REQUIRE_FALSE(load_result->HasError());
-    const std::string load_msg = load_result->GetValue(0, 0).ToString();
+    const std::string load_msg = load_result->Collection().GetValue(0, 0).ToString();
     REQUIRE(load_msg.find("2 from checkpoint") != std::string::npos);
     REQUIRE(db.manager().pending_restore_count() == 2);
 
@@ -282,7 +282,7 @@ TEST_CASE("lazy restore: dbsp_lazy_restore(false) is eager, like before",
 
     auto load_result = db.query("SELECT * FROM dbsp_load()");
     REQUIRE_FALSE(load_result->HasError());
-    const std::string load_msg = load_result->GetValue(0, 0).ToString();
+    const std::string load_msg = load_result->Collection().GetValue(0, 0).ToString();
     REQUIRE(load_msg.find("2 from checkpoint") != std::string::npos);
     REQUIRE(load_msg.find("pending lazy restore") == std::string::npos);
 
@@ -341,7 +341,7 @@ TEST_CASE("lazy restore: chained view-on-view DAG defers the whole chain",
 
     auto load_result = db.query("SELECT * FROM dbsp_load()");
     REQUIRE_FALSE(load_result->HasError());
-    const std::string load_msg = load_result->GetValue(0, 0).ToString();
+    const std::string load_msg = load_result->Collection().GetValue(0, 0).ToString();
     REQUIRE(load_msg.find("3 from checkpoint") != std::string::npos);
     REQUIRE(load_msg.find("3 pending lazy restore") != std::string::npos);
 
@@ -479,7 +479,7 @@ int64_t minCkptBlobLen(DuckDBTestHarness &db, const std::string &kind) {
                       "_dbsp_ckpt WHERE name = 'v_sum' AND kind = '" +
                       kind + "'");
     REQUIRE_FALSE(r->HasError());
-    return r->GetValue(0, 0).GetValue<int64_t>();
+    return r->Collection().GetValue(0, 0).GetValue<int64_t>();
 }
 
 // Drive the rebuild_pending_ escape hatch to completion (it runs at the

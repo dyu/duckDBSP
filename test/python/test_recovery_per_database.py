@@ -62,8 +62,8 @@ def build(dir_path: str) -> duckdb.DuckDBPyConnection:
     conn.execute("CREATE TABLE t (a INT)")
     conn.execute("INSERT INTO t SELECT i FROM range(500) s(i)")
     conn.execute("CREATE MATERIALIZED VIEW v AS SELECT a*2 AS b FROM t")
-    conn.sql("SELECT * FROM dbsp_mv_tables(true)").fetchone()
-    conn.sql("SELECT * FROM dbsp_save()").fetchone()
+    conn.execute("SELECT * FROM dbsp_mv_tables(true)").fetchone()
+    conn.execute("SELECT * FROM dbsp_save()").fetchone()
     return conn
 
 
@@ -103,7 +103,7 @@ with tempfile.TemporaryDirectory() as tmp:
     # on that database closes -- otherwise a crash after the first close
     # looks like a clean exit and the next open skips recovery.
     b = open_db(os.path.join(d4, "m.duckdb"))
-    b.sql("SELECT count(*) FROM dbsp_views()").fetchone()
+    b.execute("SELECT count(*) FROM dbsp_views()").fetchone()
     a.close()
     check("E marker survives while a second connection is open", marked(d4), True)
     b.close()
@@ -121,7 +121,7 @@ with tempfile.TemporaryDirectory() as tmp:
     c = open_db(os.path.join(d5, "m.duckdb"))
     check(
         "G late database recovers its views after a crash",
-        c.sql("SELECT count(*) FROM dbsp_views()").fetchone()[0],
+        c.execute("SELECT count(*) FROM dbsp_views()").fetchone()[0],
         1,
     )
     c.close()

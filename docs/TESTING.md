@@ -246,7 +246,7 @@ they only run when someone runs them. Each takes the extension path as its
 one argument and prints `PASS` (exit 0) or fails loudly:
 
 ```bash
-uv run --isolated --with 'duckdb==1.6.0.dev379' --with pyarrow \
+uv run --isolated --with 'duckdb==2.0.0' --with pyarrow \
   python test/python/test_ddl_syntax.py build/dbsp.duckdb_extension
 ```
 
@@ -265,8 +265,9 @@ reach: the SQL DDL front door (`test_ddl_syntax.py` — byte-exact stored SQL,
 `DROP MATERIALIZED VIEW` with `IF EXISTS` and `CASCADE`, and the same DDL again
 with `allow_parser_override_extension='DEFAULT'` so the older token path stays
 covered), `dbsp_mv_tables` semantics, window frames, self-joins. Close the connection in any script you
-add — an open DBSP connection at interpreter exit SIGSEGVs on the 2.0 alpha
-(CHANGELOG, "DuckDB 2.0 alpha issues").
+add — an open DBSP connection at interpreter exit SIGSEGVed on the 2.0 alpha
+(CHANGELOG, "DuckDB 2.0 alpha issues"; not reproduced on `v2.0.0`, but closing
+is still the rule).
 
 `test_trigger_source.py` is the one that has to run here rather than in ctest:
 it checks the delta source inside a wheel straight from PyPI, which is the
@@ -310,8 +311,10 @@ both ways out of the window (COMMIT and ROLLBACK) and then compares the view
 against plain SQL through a later edit on each connection, so a baseline short
 by the deferred rows cannot hide as a constant offset.
 
-**Known reds, measured 2026-09-04 on `v2.0.0-alpha39998`:** none. All 30
-scripts exit 0. (`test_mv_tables.py` was the standing red until
+**Known reds, measured 2026-10-21 on `v2.0.0` (`duckdb==2.0.0` wheel):** none.
+All 30 scripts exit 0. (Two needed `conn.sql(...).fetchone()` changed to
+`conn.execute(...).fetchone()`: the 2.0.0 Python client removed `fetchone()`
+from relations.) (`test_mv_tables.py` was the standing red until
 `dbsp_mv_tables(false)` was made sticky — see the CHANGELOG.)
 
 

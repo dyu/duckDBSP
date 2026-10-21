@@ -4,8 +4,8 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="$SCRIPT_DIR/build"
-DUCKDB_VERSION="v2.0.0-alpha39998"
-DUCKDB_COMMIT="a00803f7687ca3d7188d417216e288c5c4b22b58"
+DUCKDB_VERSION="v2.0.0"
+DUCKDB_COMMIT="d54cbbe3df17e8e5ce68312f483b4155836112aa"
 
 echo "=== DBSP DuckDB Extension Build ==="
 echo ""
@@ -13,7 +13,7 @@ echo ""
 # Check if DuckDB source exists. Content check, not just the directory: a CI
 # checkout of this repo leaves duckdb/ as an EMPTY submodule dir, and git
 # commands run inside it silently resolve against THIS repo.
-# Alpha engines are pinned by COMMIT (a tag would drift with the branch).
+# Pinned by COMMIT (the v2.0.0 LTS tag's commit), so a moved tag cannot change the engine.
 if [ ! -f "$SCRIPT_DIR/duckdb/CMakeLists.txt" ]; then
     echo "Fetching DuckDB ${DUCKDB_VERSION} (${DUCKDB_COMMIT})..."
     git init -q "$SCRIPT_DIR/duckdb"
@@ -23,9 +23,11 @@ if [ ! -f "$SCRIPT_DIR/duckdb/CMakeLists.txt" ]; then
 fi
 
 # Guard: duckdb/ must be its own git checkout (the version stamping and any
-# git query below would otherwise run against the wrong repo).
+# git query below would otherwise run against the wrong repo). Compared by
+# file identity (-ef), not as strings: on a case-insensitive filesystem the
+# shell keeps the path's case as typed while git reports the on-disk case.
 DUCKDB_TOPLEVEL=$(git -C "$SCRIPT_DIR/duckdb" rev-parse --show-toplevel 2>/dev/null || true)
-if [ "$DUCKDB_TOPLEVEL" != "$SCRIPT_DIR/duckdb" ]; then
+if [ -z "$DUCKDB_TOPLEVEL" ] || ! [ "$DUCKDB_TOPLEVEL" -ef "$SCRIPT_DIR/duckdb" ]; then
     echo "ERROR: $SCRIPT_DIR/duckdb is not a standalone DuckDB checkout (toplevel: ${DUCKDB_TOPLEVEL:-none})." >&2
     exit 1
 fi

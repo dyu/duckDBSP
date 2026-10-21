@@ -33,10 +33,11 @@ std::vector<std::string> queryRows(DuckDBTestHarness &h, const std::string &sql)
   auto result = h.query(sql);
   REQUIRE_FALSE(result->HasError());
   std::vector<std::vector<Value>> rows;
+  const auto result_cells = result->Collection().GetRows();
   for (size_t i = 0; i < result->RowCount(); i++) {
     std::vector<Value> row;
     for (size_t j = 0; j < result->ColumnCount(); j++)
-      row.push_back(result->GetValue(j, i));
+      row.push_back(result_cells.GetValue(j, i));
     rows.push_back(std::move(row));
   }
   return sortedRows(rows);

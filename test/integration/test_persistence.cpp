@@ -118,7 +118,7 @@ TEST_CASE("Persistence round-trip preserves view definitions", "[integration][pe
     // Verify view metadata is preserved
     auto views = db.query("SELECT * FROM dbsp_views()");
     REQUIRE(views->RowCount() == 1);
-    auto view_name = views->GetValue(0, 0).ToString();
+    auto view_name = views->Collection().GetValue(0, 0).ToString();
     REQUIRE(view_name == "big_spenders");
 
     // Verify the view still updates correctly

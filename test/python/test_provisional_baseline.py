@@ -11,11 +11,11 @@ view is short by those rows forever:
 
 The fix is a per-INSTANCE transaction watermark. At seed time the table is
 marked PROVISIONAL if DuckDB's transaction manager says a transaction OLDER
-than the seeding one is active (`LowestActiveStart() < my start_time`), with a
+than the seeding one is active (`LowestVisibilityBound() < my start_time`), with a
 watermark taken as the start timestamp of a transaction begun on the spot —
 newer than every transaction alive then. While provisional, no connection's
 commit applies an exact delta to the table; it is handed to the scan-reconcile
-instead. The first commit taken after `LowestActiveStart()` has risen to the
+instead. The first commit taken after `LowestVisibilityBound()` has risen to the
 watermark scans it once and retires the flag — including a commit that touched
 nothing, which is the case this reproduction needs, since at A's OWN commit A's
 transaction is still active.
