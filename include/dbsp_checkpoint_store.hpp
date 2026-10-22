@@ -15,7 +15,7 @@
 // what to do on failure all stay with CDCManager, which maps the explicit
 // results below onto its own replay/rebuild behavior.
 
-#include "dbsp_checkpoint.hpp"
+#include "dbsp_checkpoint_format.hpp"
 #include "dbsp_internal_connection.hpp"
 #include "dbsp_qualified_name.hpp"
 
@@ -150,9 +150,13 @@ struct WatermarkCache {
 
 // One open checkpoint write transaction. Every row of a save — version,
 // save id, view blobs, source watermarks — lands in it, so a reader sees
-// all of a save or none of it. Destroying it uncommitted rolls back. After
-// any failure the transaction is already rolled back, error() says why, and
-// every further call returns false.
+// all of a save or none of it. Destroying it uncommitted rolls back.
+//
+// A failing call either returns false — then the transaction is already
+// rolled back, error() says why, and every further call returns false — or
+// throws (a DuckDB value conversion, say), in which case destroying the
+// object rolls back. Create and destroy it on the same thread: it owns an
+// InternalConnection, whose InternalQueryGuard counts on a thread_local.
 class CheckpointWrite {
 public:
   ~CheckpointWrite() {
@@ -323,7 +327,7 @@ public:
     }
     con.Query("CREATE OR REPLACE TABLE " + ckpt_meta_tbl + " (table_name "
               "VARCHAR, row_count BIGINT, row_hash VARCHAR)");
-    // Format version (see dbsp_checkpoint.hpp kDbspCkptFormatVersion): a
+    // Format version (see dbsp_checkpoint_format.hpp): a
     // pre-bump checkpoint lacks this table entirely, so a read treats a
     // missing/mismatched version as no checkpoint at all rather than
     // misparsing node blobs written under an older layout.
@@ -358,10 +362,13 @@ public:
                                    const std::string &catalog,
                                    bool lazy_blobs) {
     CheckpointReadResult out;
-    auto storage_error = [&out](std::string error) {
-      out.status = CheckpointReadStatus::StorageError;
-      out.error = std::move(error);
-      return out;
+    // A failed read returns the error alone: nothing read before the
+    // failure (possibly a large part of an eager image) leaks out with it.
+    auto storage_error = [](std::string error) {
+      CheckpointReadResult failed;
+      failed.status = CheckpointReadStatus::StorageError;
+      failed.error = std::move(error);
+      return failed;
     };
     const std::string ckpt_tbl = qualify(catalog, "_dbsp_ckpt");
     const std::string ckpt_meta_tbl = qualify(catalog, "_dbsp_ckpt_meta");
@@ -386,7 +393,7 @@ public:
       // Format-version gate: a checkpoint saved before the version table
       // existed (or under a different blob layout) must be treated as
       // absent, never fed to node restore_state — see
-      // dbsp_checkpoint.hpp kDbspCkptFormatVersion.
+      // dbsp_checkpoint_format.hpp.
       std::string ver_exists_sql;
       if (catalog.empty()) {
         ver_exists_sql = "SELECT 1 FROM information_schema.tables WHERE "

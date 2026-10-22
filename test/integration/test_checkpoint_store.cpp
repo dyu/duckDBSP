@@ -133,7 +133,10 @@ TEST_CASE("checkpoint store: a dropped source reads as live = nullopt",
   db.exec("DROP TABLE ta");
   const auto r = CheckpointStore::read(ctx(db), "", false);
   INFO("error: " << r.error);
-  REQUIRE(r.status != CheckpointReadStatus::StorageError);
+  // The failed live query must not poison the rest of the read: va's rows
+  // are still in _dbsp_ckpt (dbsp_drop does not erase them).
+  REQUIRE(r.status == CheckpointReadStatus::Usable);
+  REQUIRE(r.image.sinks.count("va") == 1);
   const auto *c = checkFor(r);
   REQUIRE(c != nullptr);
   REQUIRE_FALSE(c->live.has_value());
@@ -147,6 +150,12 @@ TEST_CASE("checkpoint store: malformed _dbsp_ckpt is a StorageError",
   const auto r = CheckpointStore::read(ctx(db), "", false);
   REQUIRE(r.status == CheckpointReadStatus::StorageError);
   REQUIRE_FALSE(r.error.empty());
+  // Nothing read before the failure leaks out with the error.
+  REQUIRE(r.watermarks.empty());
+  REQUIRE(r.image.sinks.empty());
+  REQUIRE(r.image.nodes.empty());
+  REQUIRE(r.image.sql_fingerprints.empty());
+  REQUIRE(r.image.view_arr_id.empty());
 }
 
 TEST_CASE("checkpoint store: attached catalog reads its own tables",

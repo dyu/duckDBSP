@@ -1,5 +1,25 @@
 # Changelog
 
+## CheckpointStore review follow-ups — 2026-10-21
+
+The five minor findings deferred from the refactor's final review:
+- **The store no longer depends on the view or tracked-table types.**
+  `kDbspCkptFormatVersion` moved to `dbsp_checkpoint_format.hpp`, so the
+  store stops including the blob codecs, and through them every view and
+  tracked-table type, as spec section 1 requires. New unit target
+  `checkpoint_store_isolation` keeps it that way: it fails to compile if the
+  types come back.
+- **A failed read returns only the error.** Before, a `StorageError` result
+  could carry whatever had been read before the failure, including the
+  watermark checks.
+- **The dropped-source test now pins the whole contract:** the read stays
+  `Usable`, and the other views' rows are still there.
+- **`CheckpointWrite`'s comment states its real contract.** A failing call
+  returns false or throws, and either way it rolls back. The object must be
+  created and destroyed on the same thread.
+
+48/48 ctest green.
+
 ## Refactor: CheckpointStore owns the checkpoint tables — 2026-10-21
 
 All `_dbsp_ckpt*` table I/O moved out of `CDCManager` into

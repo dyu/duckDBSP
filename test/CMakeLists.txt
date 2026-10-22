@@ -72,6 +72,7 @@ add_dbsp_test(auto_cdc unit/test_auto_cdc.cpp)
 add_dbsp_test(row_hash unit/test_row_hash.cpp)
 add_dbsp_test(window_incremental unit/test_window_incremental.cpp)
 add_dbsp_test(window_packed unit/test_window_packed.cpp)
+add_dbsp_test(checkpoint_store_isolation unit/test_checkpoint_store_isolation.cpp)
 
 # Integration tests (require DuckDB)
 function(add_dbsp_integration_test TEST_NAME SOURCE)

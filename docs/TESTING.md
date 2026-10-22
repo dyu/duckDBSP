@@ -285,6 +285,11 @@ malformed table must never read as an empty valid checkpoint. Other cases:
 - watermark-cache use;
 - attached catalogs on both the read and the write side.
 
+`test_checkpoint_store_isolation` (`test/unit/`) is a build-time guard. It
+includes the store header alone, then declares its own `TrackedTable`,
+`NativeMaterializedView` and `CDCManager`. If the store ever pulls in the
+manager's real types again, that file stops compiling.
+
 ### Python scripts (`test/python/`)
 
 `test/python/*.py` are standalone probe scripts, **not wired into ctest** —
