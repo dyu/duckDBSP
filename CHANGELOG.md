@@ -5,7 +5,8 @@
 All `_dbsp_ckpt*` table I/O moved out of `CDCManager` into
 `include/dbsp_checkpoint_store.hpp`. That covers the SQL, the row formats,
 the save transaction, the load-time reads and the per-view lazy blob
-fetches. No behavior change was intended, and the SQL is byte-identical.
+fetches. No behavior change was intended, and the SQL is byte-identical for
+every reachable input, with one deliberate exception, below.
 
 The store is an I/O owner only. It holds no manager, view, tracked-table or
 instance state, and never sets `last_error_`. Its reads report `Usable`,
@@ -29,6 +30,16 @@ covers attached catalogs, empty checkpoints, dropped sources, malformed
 tables and failed commits. `checkpoint_invariants` stayed green through
 every step, and a deliberately broken watermark cache still fails it after
 the move.
+
+**Fixed during the final review: a view whose SQL contains `\` or a non-ASCII
+character broke every save.** The SQL fingerprint row was built as
+`Value::BLOB(string)`. That parses `\` escapes and rejects bytes above 127, so
+a definition such as `WHERE name <> 'café'`, or a regex like `'\d+'`, made
+every `dbsp_save` fail with a Conversion Error. A valid `\x41` would instead
+be silently decoded, so the fingerprint never matched. The bug predates the
+refactor. The fingerprint is now stored as raw bytes. A checkpoint whose
+stored fingerprint had been decoded simply replays that view once. Pinned by
+`checkpoint_invariants`.
 
 47/47 ctest green; 30/30 Python probes exit 0 on `duckdb==2.0.0`.
 

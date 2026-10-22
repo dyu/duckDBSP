@@ -181,3 +181,37 @@ TEST_CASE("checkpoint invariants: a save that fails at COMMIT records "
   REQUIRE(msg.find("3 from checkpoint") != std::string::npos);
   requireAllCorrect(db);
 }
+
+TEST_CASE("checkpoint invariants: a view whose SQL has a backslash or "
+          "non-ASCII literal still checkpoints and restores",
+          "[integration][checkpoint][checkpoint_invariants]") {
+  // The SQL fingerprint row stores the view's definition as a BLOB. Built
+  // from a string, a BLOB value parses `\` escapes and rejects bytes above
+  // 127, so such a definition must be stored as raw bytes: otherwise every
+  // save fails, or the fingerprint silently never matches.
+  DuckDBTestHarness db;
+  db.exec("SELECT * FROM dbsp_lazy_restore(true)");
+  db.exec("CREATE TABLE tc (grp VARCHAR, v INTEGER)");
+  db.exec("SELECT * FROM dbsp_track('tc')");
+  db.exec("INSERT INTO tc VALUES ('café', 1), ('x\\d', 2), ('y', 3)");
+  db.exec("SELECT * FROM dbsp_sync()");
+  const std::string sql =
+      "SELECT grp, SUM(v) AS s FROM tc WHERE grp <> ''é\\d'' GROUP BY grp";
+  db.exec("SELECT * FROM dbsp_create_view('vc', '" + sql + "')");
+  REQUIRE(db.manager().get_view("vc")->checkpointable());
+
+  const std::string saved = save(db);
+  INFO("save: " << saved);
+  REQUIRE(saved.find("no circuit checkpoint") == std::string::npos);
+
+  REQUIRE_FALSE(db.query("SELECT dbsp_drop('vc')")->HasError());
+  auto r = db.query("SELECT * FROM dbsp_load()");
+  REQUIRE_FALSE(r->HasError());
+  const std::string msg = r->Collection().GetValue(0, 0).ToString();
+  INFO("load: " << msg);
+  REQUIRE(msg.find("1 from checkpoint") != std::string::npos);
+  REQUIRE(db.manager().is_view_pending("vc"));
+  requireViewMatches(
+      db, "vc",
+      "SELECT grp, SUM(v) AS s FROM tc WHERE grp <> 'é\\d' GROUP BY grp");
+}

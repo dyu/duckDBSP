@@ -194,9 +194,15 @@ public:
     }
     // SQL fingerprint (Finding 1): the view's exact definition at save
     // time, so a load whose _dbsp_views SQL has since diverged can detect
-    // the mismatch and decline the fast path for this view.
-    auto rsql = ins_->Execute("sql", v.name, static_cast<int64_t>(0),
-                              duckdb::Value::BLOB(v.sql));
+    // the mismatch and decline the fast path for this view. Raw bytes: a
+    // BLOB built from a string parses `\` escapes and rejects bytes above
+    // 127, so a definition with a regex or non-ASCII literal failed every
+    // save.
+    auto rsql = ins_->Execute(
+        "sql", v.name, static_cast<int64_t>(0),
+        duckdb::Value::BLOB(
+            reinterpret_cast<duckdb::const_data_ptr_t>(v.sql.data()),
+            v.sql.size()));
     return rsql->HasError() ? fail(rsql->GetError()) : true;
   }
 
