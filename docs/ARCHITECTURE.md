@@ -26,6 +26,15 @@ Internal design of the DBSP DuckDB extension.
 │  └─────────────────────────────────────────────────────────────┘│
 │                              │                                   │
 │  ┌─────────────────────────────────────────────────────────────┐│
+│  │              Checkpoint Store (CheckpointStore)             ││
+│  │  - Owns _dbsp_ckpt* table I/O: one write transaction per    ││
+│  │    save, reads as Usable / NoCheckpoint / StorageError,     ││
+│  │    per-view blob fetch for lazy restore                     ││
+│  │  - No policy: CDC Manager decides what to save, preserve,   ││
+│  │    mark stale, and when a save counts as saved              ││
+│  └─────────────────────────────────────────────────────────────┘│
+│                              │                                   │
+│  ┌─────────────────────────────────────────────────────────────┐│
 │  │      Auto-sync hooks (DBSPContextState, per connection)      ││
 │  │  - Trigger-fed exact deltas: generated AFTER triggers hand   ││
 │  │    old/new images to dbsp_trigger_ingest during the          ││
@@ -520,6 +529,9 @@ State after:
 
 - All data stored in-memory
 - No automatic eviction or bounds
+- Checkpoint rows are read and written only through `CheckpointStore`
+  (`dbsp_checkpoint_store.hpp`); `CDCManager` keeps every checkpoint
+  decision and maps the store's results onto replay or rebuild.
 - Persistence saves definitions plus (D3b) a circuit-state checkpoint for
   supported views: aggregate group scalars plus (Task 2, cold/restore
   attack) the per-group values multiset for plain non-DISTINCT MIN/MAX,

@@ -1,5 +1,37 @@
 # Changelog
 
+## Refactor: CheckpointStore owns the checkpoint tables — 2026-10-21
+
+All `_dbsp_ckpt*` table I/O moved out of `CDCManager` into
+`include/dbsp_checkpoint_store.hpp`. That covers the SQL, the row formats,
+the save transaction, the load-time reads and the per-view lazy blob
+fetches. No behavior change was intended, and the SQL is byte-identical.
+
+The store is an I/O owner only. It holds no manager, view, tracked-table or
+instance state, and never sets `last_error_`. Its reads report `Usable`,
+`NoCheckpoint` or `StorageError`, along with each source's saved and live
+watermark. `CDCManager` keeps every decision:
+- what to save and which views to preserve;
+- which tables are stale;
+- when a save counts as saved;
+- what a failure means, which is still replay or rebuild, as before.
+
+The save is a `CheckpointWrite` transaction object that rolls back unless
+committed. The manager still holds `struct_mutex_` shared only around the
+watermark step. Its watermark cache is two callbacks: `lookup` arms
+`wm_begin_scan` before the store scans, and `stored` calls `wm_store`.
+
+The two copies of the per-view blob probe (lazy realize, and the
+cross-catalog pending copy at save) are now one function.
+
+New ctest target `checkpoint_store` (17 cases) drives the store directly. It
+covers attached catalogs, empty checkpoints, dropped sources, malformed
+tables and failed commits. `checkpoint_invariants` stayed green through
+every step, and a deliberately broken watermark cache still fails it after
+the move.
+
+47/47 ctest green; 30/30 Python probes exit 0 on `duckdb==2.0.0`.
+
 ## Checkpoint invariants pinned before the checkpoint-store refactor — 2026-10-21
 
 **A save whose COMMIT failed would still have recorded its views as saved.**

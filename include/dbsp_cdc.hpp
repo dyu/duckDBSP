@@ -705,9 +705,10 @@ public:
   }
 
   // --- Circuit-state checkpointing (D3b) --------------------------------
-  // Persist per-view operator state (aggregate groups, private join
-  // indexes) and sink results into _dbsp_ckpt, plus per-source watermarks
-  // (COUNT + bit_xor(hash(row))) into _dbsp_ckpt_meta. Baselines and
+  // Persist, through CheckpointStore, per-view operator state (aggregate
+  // groups, private join indexes) and sink results into _dbsp_ckpt, plus
+  // per-source watermarks (COUNT + bit_xor(hash(row))) into
+  // _dbsp_ckpt_meta. Baselines and
   // shared arrangements are NOT persisted: with the watermark verified at
   // load, the baseline is by definition the committed table content, so
   // the load fast path defers it entirely (D3c) — TrackedTables start

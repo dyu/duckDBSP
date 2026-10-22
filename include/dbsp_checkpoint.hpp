@@ -5,9 +5,10 @@
 // A checkpoint captures everything a view needs to resume incremental
 // maintenance without replaying its sources: per-node operator state
 // (aggregate groups, sink materialization), shared join arrangements, and
-// tracked-table baselines. Blobs are opaque byte strings written to the
-// _dbsp_ckpt table by CDCManager::save_checkpoint and read back by
-// load_from_duck_table's fast path.
+// tracked-table baselines. Blobs are opaque byte strings that
+// CDCManager::save_checkpoint encodes and CheckpointStore
+// (dbsp_checkpoint_store.hpp) writes to the _dbsp_ckpt table; the store
+// reads them back for load_from_duck_table's fast path.
 //
 // Any node kind without checkpoint support marks its whole view
 // non-checkpointable; such views fall back to the normal rebuild-by-replay

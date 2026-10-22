@@ -267,6 +267,24 @@ went red:
 - Promoting saved generations before COMMIT failed the failed-save case with
   wrong view values, which is the silent mis-restore it exists to catch.
 
+### `checkpoint_store` — the checkpoint I/O boundary
+
+`test_checkpoint_store` (`test/integration/test_checkpoint_store.cpp`, 17
+cases) drives `CheckpointStore` directly, below the manager's policy, so a
+storage regression points at the store instead of surfacing as a wrong
+restore. Reads must report `Usable`, `NoCheckpoint` or `StorageError`, and a
+malformed table must never read as an empty valid checkpoint. Other cases:
+- lazy placeholders;
+- a version mismatch;
+- a checkpoint with no views in it;
+- edited and dropped sources;
+- per-view blob fetch and row erase;
+- rollback of an uncommitted write;
+- a failed commit leaving the previous checkpoint readable;
+- preserved views' rows surviving a save;
+- watermark-cache use;
+- attached catalogs on both the read and the write side.
+
 ### Python scripts (`test/python/`)
 
 `test/python/*.py` are standalone probe scripts, **not wired into ctest** —

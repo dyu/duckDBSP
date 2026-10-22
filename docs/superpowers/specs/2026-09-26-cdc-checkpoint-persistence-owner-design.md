@@ -1,6 +1,6 @@
 # CDC checkpoint persistence owner
 
-**Status:** Draft for review. This is the next incremental CDCManager refactor slice. The implementation plan and code phase follow after review of this spec.
+**Status:** Implemented 2026-10-21 (plan: docs/superpowers/plans/2026-10-21-checkpoint-store.md).
 
 ## Problem
 
