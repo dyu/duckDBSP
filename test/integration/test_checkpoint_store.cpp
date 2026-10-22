@@ -206,3 +206,150 @@ TEST_CASE("checkpoint store: erase_view_rows removes only that view",
   REQUIRE(count("va") == 0);
   REQUIRE(count("vb") > 0);
 }
+
+namespace {
+
+// A view's persisted rows as a ViewBlobs, from an eager read.
+dbsp_native::ViewBlobs blobsOf(const dbsp_native::CheckpointImage &image,
+                               const std::string &view) {
+  dbsp_native::ViewBlobs b;
+  b.name = view;
+  b.sql = image.sql_fingerprints.at(view);
+  for (const auto &[id, bytes] : image.nodes.at(view)) {
+    b.nodes.emplace_back(id, bytes);
+  }
+  b.sink = image.sinks.at(view);
+  return b;
+}
+
+dbsp_native::ViewBlobs fakeView(const std::string &name) {
+  dbsp_native::ViewBlobs b;
+  b.name = name;
+  b.sql = "SELECT 1";
+  b.sink = {1, 2, 3};
+  return b;
+}
+
+} // namespace
+
+TEST_CASE("checkpoint store: an uncommitted write rolls back",
+          "[integration][checkpoint][checkpoint_store]") {
+  DuckDBTestHarness db;
+  setupSaved(db);
+  {
+    std::string err;
+    auto w = CheckpointStore::begin_write(ctx(db), "", {}, err);
+    REQUIRE(w != nullptr);
+    REQUIRE(w->write_view(fakeView("zz")));
+  } // destroyed without commit
+  const auto r = CheckpointStore::read(ctx(db), "", false);
+  REQUIRE(r.status == CheckpointReadStatus::Usable);
+  REQUIRE(r.image.sinks.count("zz") == 0);
+  REQUIRE(r.image.sinks.count("va") == 1);
+}
+
+TEST_CASE("checkpoint store: a failed commit leaves the previous checkpoint "
+          "readable",
+          "[integration][checkpoint][checkpoint_store]") {
+  DuckDBTestHarness db;
+  setupSaved(db);
+  std::string err;
+  auto w = CheckpointStore::begin_write(ctx(db), "", {}, err);
+  REQUIRE(w != nullptr);
+  REQUIRE(w->write_view(fakeView("zz")));
+  dbsp_native::g_fail_next_ckpt_commit = true;
+  REQUIRE_FALSE(w->commit());
+  REQUIRE(w->error() == "checkpoint commit failed: injected by test");
+  REQUIRE_FALSE(dbsp_native::g_fail_next_ckpt_commit.load());
+  w.reset();
+  const auto r = CheckpointStore::read(ctx(db), "", false);
+  REQUIRE(r.status == CheckpointReadStatus::Usable);
+  REQUIRE(r.image.sinks.count("va") == 1);
+  REQUIRE(r.image.sinks.count("zz") == 0);
+}
+
+TEST_CASE("checkpoint store: preserve keeps listed views' rows",
+          "[integration][checkpoint][checkpoint_store]") {
+  DuckDBTestHarness db;
+  setupSaved(db);
+  db.exec("SELECT * FROM dbsp_create_view('vb', "
+          "'SELECT grp, COUNT(*) AS n FROM ta GROUP BY grp')");
+  REQUIRE_FALSE(db.query("SELECT * FROM dbsp_save()")->HasError());
+  const auto before = CheckpointStore::read(ctx(db), "", false).image;
+  std::string err;
+  auto w = CheckpointStore::begin_write(ctx(db), "", {"va"}, err);
+  REQUIRE(w != nullptr);
+  REQUIRE(w->write_view(blobsOf(before, "vb")));
+  REQUIRE(w->commit());
+  w.reset();
+  const auto after = CheckpointStore::read(ctx(db), "", false).image;
+  REQUIRE(after.sinks.count("va") == 1);
+  REQUIRE(after.sinks.count("vb") == 1);
+  REQUIRE(after.sinks.at("va") == before.sinks.at("va"));
+  REQUIRE(after.sinks.at("vb") == before.sinks.at("vb"));
+}
+
+TEST_CASE("checkpoint store: write_watermarks uses the cache and reports "
+          "scans",
+          "[integration][checkpoint][checkpoint_store]") {
+  DuckDBTestHarness db;
+  setupSaved(db);
+  db.exec("CREATE TABLE tb (v INTEGER)");
+  db.exec("INSERT INTO tb VALUES (1), (2)");
+  const auto prior = CheckpointStore::read(ctx(db), "", false);
+  const auto *ta_check = checkFor(prior);
+  REQUIRE(ta_check != nullptr);
+  const std::string ta = ta_check->table;
+  const std::string tb = ta.substr(0, ta.size() - 2) + "tb"; // same schema
+
+  std::vector<std::string> looked_up, stored;
+  dbsp_native::WatermarkCache cache;
+  cache.lookup = [&](const std::string &t, dbsp_native::SourceWatermark &out) {
+    looked_up.push_back(t);
+    if (t == ta) {
+      out = {7, "h"};
+      return true;
+    }
+    return false;
+  };
+  cache.stored = [&](const std::string &t, const dbsp_native::SourceWatermark &) {
+    stored.push_back(t);
+  };
+
+  std::string err;
+  auto w = CheckpointStore::begin_write(ctx(db), "", {}, err);
+  REQUIRE(w != nullptr);
+  REQUIRE(w->write_view(fakeView("zz")));
+  std::unordered_map<std::string, dbsp_native::SourceWatermark> saved;
+  REQUIRE(w->write_watermarks({ta, tb}, cache, saved));
+  REQUIRE(w->commit());
+  w.reset();
+
+  REQUIRE(looked_up == std::vector<std::string>{ta, tb});
+  REQUIRE(stored == std::vector<std::string>{tb});
+  REQUIRE(saved.at(ta) == dbsp_native::SourceWatermark{7, "h"});
+  REQUIRE(saved.at(tb).count == 2);
+  const auto r = CheckpointStore::read(ctx(db), "", false);
+  REQUIRE(r.watermarks.size() == 2);
+  const auto *c = checkFor(r);
+  REQUIRE(c != nullptr);
+  REQUIRE(c->saved == dbsp_native::SourceWatermark{7, "h"});
+}
+
+TEST_CASE("checkpoint store: attached catalog write lands in that catalog",
+          "[integration][checkpoint][checkpoint_store]") {
+  DuckDBTestHarness db;
+  db.exec("ATTACH ':memory:' AS m");
+  std::string err;
+  auto w = CheckpointStore::begin_write(ctx(db), "m", {}, err);
+  INFO("error: " << err);
+  REQUIRE(w != nullptr);
+  REQUIRE(w->write_view(fakeView("zz")));
+  REQUIRE(w->commit());
+  w.reset();
+  const auto m = CheckpointStore::read(ctx(db), "m", false);
+  REQUIRE(m.status == CheckpointReadStatus::Usable);
+  REQUIRE(m.image.sinks.count("zz") == 1);
+  REQUIRE(CheckpointStore::read(ctx(db), "", false).status ==
+          CheckpointReadStatus::NoCheckpoint);
+}

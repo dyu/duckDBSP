@@ -22,7 +22,10 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/connection.hpp"
 
+#include <atomic>
 #include <cstdint>
+#include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -107,8 +110,236 @@ struct CheckpointReadResult {
   std::string error; // set for StorageError
 };
 
+// Test-only fault injection: when set, the next CheckpointWrite::commit()
+// rolls back at the point it would COMMIT and reports a commit failure
+// (then the flag clears). Lets tests pin that a failed save promotes
+// nothing.
+inline std::atomic<bool> g_fail_next_ckpt_commit{false};
+
+// The live watermark of `table` on `con`, or nullopt when the query fails
+// (the table vanished or cannot be read). The alias must not be shadowable
+// by a same-named column: `hash(x)` resolves to the COLUMN x when one
+// exists, silently hashing a single column instead of the row and blinding
+// the watermark to every other column's updates.
+inline std::optional<SourceWatermark>
+query_source_watermark(duckdb::Connection &con, const std::string &table) {
+  auto wm = con.Query("SELECT COUNT(*), CAST(bit_xor(hash("
+                      "__dbsp_wm_row)) AS VARCHAR) FROM " +
+                      quote_table_key(table) + " __dbsp_wm_row");
+  if (wm->HasError() || wm->RowCount() != 1) {
+    return std::nullopt;
+  }
+  SourceWatermark out;
+  out.count = wm->Collection().GetValue(0, 0).GetValue<int64_t>();
+  out.hash = wm->Collection().GetValue(1, 0).ToString();
+  return out;
+}
+
+// The manager's per-table watermark cache, consulted by write_watermarks.
+// Both functions run on the caller's thread, inside whatever lock the
+// caller holds around write_watermarks; they must not take that lock again.
+struct WatermarkCache {
+  // True with `out` filled: the table's cached watermark is clean, no scan.
+  // False: the callee has armed a scan (or the table is untracked) and the
+  // store scans it now.
+  std::function<bool(const std::string &table, SourceWatermark &out)> lookup;
+  // A watermark the store just scanned.
+  std::function<void(const std::string &table, const SourceWatermark &wm)>
+      stored;
+};
+
+// One open checkpoint write transaction. Every row of a save — version,
+// save id, view blobs, source watermarks — lands in it, so a reader sees
+// all of a save or none of it. Destroying it uncommitted rolls back. After
+// any failure the transaction is already rolled back, error() says why, and
+// every further call returns false.
+class CheckpointWrite {
+public:
+  ~CheckpointWrite() {
+    if (!finished_) {
+      try {
+        (*con_owner_).Query("ROLLBACK");
+      } catch (...) {
+      }
+    }
+  }
+  CheckpointWrite(const CheckpointWrite &) = delete;
+  CheckpointWrite &operator=(const CheckpointWrite &) = delete;
+
+  // The view-arrangement sidecar identity of this save (kind='saveid').
+  bool write_save_id(int64_t seq, const std::string &id) {
+    if (finished_) {
+      return false;
+    }
+    auto r = ins_->Execute("saveid", "", seq, duckdb::Value::BLOB(id));
+    return r->HasError() ? fail(r->GetError()) : true;
+  }
+
+  // A view's node rows, sink row and SQL fingerprint row.
+  bool write_view(const ViewBlobs &v) {
+    if (finished_) {
+      return false;
+    }
+    for (const auto &[node_id, blob] : v.nodes) {
+      auto r = ins_->Execute("node", v.name, static_cast<int64_t>(node_id),
+                             duckdb::Value::BLOB(blob.data(), blob.size()));
+      if (r->HasError()) {
+        return fail(r->GetError());
+      }
+    }
+    auto r = ins_->Execute("sink", v.name, static_cast<int64_t>(0),
+                           duckdb::Value::BLOB(v.sink.data(), v.sink.size()));
+    if (r->HasError()) {
+      return fail(r->GetError());
+    }
+    // SQL fingerprint (Finding 1): the view's exact definition at save
+    // time, so a load whose _dbsp_views SQL has since diverged can detect
+    // the mismatch and decline the fast path for this view.
+    auto rsql = ins_->Execute("sql", v.name, static_cast<int64_t>(0),
+                              duckdb::Value::BLOB(v.sql));
+    return rsql->HasError() ? fail(rsql->GetError()) : true;
+  }
+
+  // One _dbsp_ckpt_meta row per table: the cached watermark when `cache`
+  // has a clean one, else a scan inside this transaction (reported back
+  // through cache.stored). `saved` receives every watermark written.
+  bool write_watermarks(
+      const std::vector<std::string> &tables, const WatermarkCache &cache,
+      std::unordered_map<std::string, SourceWatermark> &saved) {
+    if (finished_) {
+      return false;
+    }
+    for (const auto &t : tables) {
+      SourceWatermark wm;
+      if (!cache.lookup(t, wm)) {
+        auto scanned = query_source_watermark(*con_owner_, t);
+        if (!scanned) {
+          return fail("checkpoint watermark failed for " + t);
+        }
+        wm = std::move(*scanned);
+        cache.stored(t, wm);
+      }
+      auto r = insm_->Execute(t, duckdb::Value::BIGINT(wm.count), wm.hash);
+      if (r->HasError()) {
+        return fail(r->GetError());
+      }
+      saved[t] = std::move(wm);
+    }
+    return true;
+  }
+
+  // COMMIT. False when it failed — then nothing of this save was written.
+  bool commit() {
+    if (finished_) {
+      return false;
+    }
+    if (g_fail_next_ckpt_commit.exchange(false)) {
+      return fail("checkpoint commit failed: injected by test");
+    }
+    auto committed = (*con_owner_).Query("COMMIT");
+    finished_ = true;
+    if (!committed || committed->HasError()) {
+      error_ = "checkpoint commit failed: " +
+               (committed ? committed->GetError() : "null result");
+      return false;
+    }
+    return true;
+  }
+
+  const std::string &error() const { return error_; }
+
+private:
+  friend class CheckpointStore;
+
+  // WHITELISTED for the DDL AND the per-source watermark reads. The DDL
+  // creates DBSP's OWN bookkeeping tables (_dbsp_ckpt*), never the user's,
+  // so it never needs to see their uncommitted catalog. The watermarks
+  // describe COMMITTED storage and are compared against committed storage
+  // at restore, beside circuit state that is likewise committed-only
+  // (deltas apply at commit), so a reader that cannot see an open
+  // transaction's rows is reading exactly the right thing.
+  explicit CheckpointWrite(duckdb::ClientContext &context)
+      : con_owner_(context, InternalReadPolicy::AllowedInTxn,
+                   "save_checkpoint (bookkeeping DDL + source watermarks)") {}
+
+  bool fail(std::string error) {
+    try {
+      (*con_owner_).Query("ROLLBACK");
+    } catch (...) {
+    }
+    finished_ = true;
+    error_ = std::move(error);
+    return false;
+  }
+
+  InternalConnection con_owner_;
+  duckdb::unique_ptr<duckdb::PreparedStatement> ins_, insm_, insv_;
+  bool finished_ = false;
+  std::string error_;
+};
+
 class CheckpointStore {
 public:
+  // Open a checkpoint write in `catalog` ("" = default): BEGIN, then
+  // _dbsp_ckpt is replaced — or, when `preserve` names views, kept with
+  // only those views' rows (a still-pending lazy view's rows are the ONLY
+  // copy of its bytes) — _dbsp_ckpt_meta and _dbsp_ckpt_version are
+  // replaced, and the format version row is written. nullptr with `error`
+  // set on failure, already rolled back.
+  static std::unique_ptr<CheckpointWrite>
+  begin_write(duckdb::ClientContext &context, const std::string &catalog,
+              const std::vector<std::string> &preserve, std::string &error) {
+    std::unique_ptr<CheckpointWrite> w(new CheckpointWrite(context));
+    auto &con = *w->con_owner_;
+    const std::string ckpt_tbl = qualify(catalog, "_dbsp_ckpt");
+    const std::string ckpt_meta_tbl = qualify(catalog, "_dbsp_ckpt_meta");
+    const std::string ckpt_ver_tbl = qualify(catalog, "_dbsp_ckpt_version");
+    con.Query("BEGIN");
+    if (preserve.empty()) {
+      con.Query("CREATE OR REPLACE TABLE " + ckpt_tbl + " (kind VARCHAR, "
+                "name VARCHAR, node_id BIGINT, data BLOB)");
+    } else {
+      // The table necessarily exists with this schema: the preserved views'
+      // placeholders were stashed by a load that read it from this catalog.
+      con.Query("CREATE TABLE IF NOT EXISTS " + ckpt_tbl + " (kind "
+                "VARCHAR, name VARCHAR, node_id BIGINT, data BLOB)");
+      std::string keep;
+      for (const auto &n : preserve) {
+        keep += (keep.empty() ? "'" : ", '") + escape_sql_literal(n) + "'";
+      }
+      auto del = con.Query("DELETE FROM " + ckpt_tbl +
+                           " WHERE name NOT IN (" + keep + ")");
+      if (del->HasError()) {
+        w->fail(del->GetError());
+        error = w->error();
+        return nullptr;
+      }
+    }
+    con.Query("CREATE OR REPLACE TABLE " + ckpt_meta_tbl + " (table_name "
+              "VARCHAR, row_count BIGINT, row_hash VARCHAR)");
+    // Format version (see dbsp_checkpoint.hpp kDbspCkptFormatVersion): a
+    // pre-bump checkpoint lacks this table entirely, so a read treats a
+    // missing/mismatched version as no checkpoint at all rather than
+    // misparsing node blobs written under an older layout.
+    con.Query("CREATE OR REPLACE TABLE " + ckpt_ver_tbl + " (version BIGINT)");
+    w->ins_ = con.Prepare("INSERT INTO " + ckpt_tbl + " VALUES ($1, $2, $3, $4)");
+    w->insm_ = con.Prepare("INSERT INTO " + ckpt_meta_tbl + " VALUES ($1, $2, $3)");
+    w->insv_ = con.Prepare("INSERT INTO " + ckpt_ver_tbl + " VALUES ($1)");
+    if (!w->ins_ || w->ins_->HasError() || !w->insm_ || w->insm_->HasError() ||
+        !w->insv_ || w->insv_->HasError()) {
+      w->fail("checkpoint prepare failed");
+      error = w->error();
+      return nullptr;
+    }
+    auto rv = w->insv_->Execute(static_cast<int64_t>(kDbspCkptFormatVersion));
+    if (rv->HasError()) {
+      w->fail(rv->GetError());
+      error = w->error();
+      return nullptr;
+    }
+    return w;
+  }
+
   // Read the checkpoint in `catalog` ("" = the default catalog). With
   // `lazy_blobs`, node/sink entries are empty placeholders (names and ids
   // only) and the bytes stay in _dbsp_ckpt for read_view_blobs.
@@ -182,7 +413,7 @@ public:
         check.table = meta_cells.GetValue(0, i).ToString();
         check.saved.count = meta_cells.GetValue(1, i).GetValue<int64_t>();
         check.saved.hash = meta_cells.GetValue(2, i).ToString();
-        check.live = live_watermark(con, check.table);
+        check.live = query_source_watermark(con, check.table);
         out.watermarks.push_back(std::move(check));
       }
       // View-arrangement sidecar identity (kind='saveid'; design note at
@@ -321,25 +552,6 @@ public:
                 escape_sql_literal(view) + "'");
     } catch (...) {
     }
-  }
-
-private:
-  // The live watermark of `table` on `con`, or nullopt when the query
-  // fails (the table vanished or cannot be read). The alias must not be
-  // shadowable by a same-named column: `hash(x)` resolves to the COLUMN x
-  // when one exists, silently hashing a single column instead of the row.
-  static std::optional<SourceWatermark> live_watermark(duckdb::Connection &con,
-                                                       const std::string &table) {
-    auto wm = con.Query("SELECT COUNT(*), CAST(bit_xor(hash("
-                        "__dbsp_wm_row)) AS VARCHAR) FROM " +
-                        quote_table_key(table) + " __dbsp_wm_row");
-    if (wm->HasError() || wm->RowCount() != 1) {
-      return std::nullopt;
-    }
-    SourceWatermark out;
-    out.count = wm->Collection().GetValue(0, 0).GetValue<int64_t>();
-    out.hash = wm->Collection().GetValue(1, 0).ToString();
-    return out;
   }
 };
 

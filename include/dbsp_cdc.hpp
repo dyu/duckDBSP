@@ -69,10 +69,6 @@ inline std::atomic<size_t> g_lazy_view_decodes{0};
 // realize_pending_view_locked (its callers hold struct_mutex_ shared, so
 // the try-lock always fails and the message goes to stderr only).
 inline std::atomic<size_t> g_lazy_realize_failures{0};
-// Test-only fault injection: when set, the next save_checkpoint() rolls back
-// at the point it would COMMIT and reports a commit failure (then the flag
-// clears). Lets tests pin that a failed save promotes nothing.
-inline std::atomic<bool> g_fail_next_ckpt_commit{false};
 
 // View-arrangement sidecars (design note at save_checkpoint's sidecar
 // loop): test-observable counters, same g_* convention as above.
@@ -870,71 +866,14 @@ public:
       }
     }
 
-    const std::string ckpt_tbl = qualify(catalog, "_dbsp_ckpt");
-    const std::string ckpt_meta_tbl = qualify(catalog, "_dbsp_ckpt_meta");
-    const std::string ckpt_ver_tbl = qualify(catalog, "_dbsp_ckpt_version");
-
     try {
-      // WHITELISTED for the DDL below AND the per-source watermark reads
-      // further down. The DDL creates DBSP's OWN bookkeeping tables
-      // (_dbsp_ckpt*), never the user's, so it never needs to see their
-      // uncommitted catalog — the hazard the sweep's DDL hit. The watermarks
-      // describe COMMITTED storage and are compared against committed storage
-      // at restore, beside circuit state that is likewise committed-only
-      // (deltas apply at commit), so a reader that cannot see an open
-      // transaction's rows is reading exactly the right thing.
       DbspScopeTimer t_write("ckpt_write", "tables+watermarks");
-      InternalConnection con_owner(
-          context, InternalReadPolicy::AllowedInTxn,
-          "save_checkpoint (bookkeeping DDL + source watermarks)");
-      auto &con = *con_owner;
-      con.Query("BEGIN");
-      if (preserve_pending.empty()) {
-        con.Query("CREATE OR REPLACE TABLE " + ckpt_tbl + " (kind VARCHAR, "
-                  "name VARCHAR, node_id BIGINT, data BLOB)");
-      } else {
-        // Keep still-pending lazy views' rows (node/sink/sql) -- the only
-        // copy of their bytes -- and replace everything else. The table
-        // necessarily exists with this schema: the placeholders were
-        // stashed by a load that read it from this same catalog.
-        con.Query("CREATE TABLE IF NOT EXISTS " + ckpt_tbl + " (kind "
-                  "VARCHAR, name VARCHAR, node_id BIGINT, data BLOB)");
-        std::string keep;
-        for (const auto &n : preserve_pending) {
-          keep += (keep.empty() ? "'" : ", '") + escape_string(n) + "'";
-        }
-        auto del = con.Query("DELETE FROM " + ckpt_tbl +
-                             " WHERE name NOT IN (" + keep + ")");
-        if (del->HasError()) {
-          con.Query("ROLLBACK");
-          last_error_ = del->GetError();
-          return false;
-        }
-      }
-      con.Query("CREATE OR REPLACE TABLE " + ckpt_meta_tbl + " (table_name "
-                "VARCHAR, row_count BIGINT, row_hash VARCHAR)");
-      // Format version (see dbsp_checkpoint.hpp kDbspCkptFormatVersion): a
-      // pre-bump checkpoint lacks this table entirely, so checkpoint_valid
-      // treats a missing/mismatched version as no checkpoint at all rather
-      // than misparsing node blobs written under an older layout.
-      con.Query("CREATE OR REPLACE TABLE " + ckpt_ver_tbl + " (version BIGINT)");
-      auto ins = con.Prepare("INSERT INTO " + ckpt_tbl + " VALUES ($1, $2, $3, $4)");
-      auto insm = con.Prepare("INSERT INTO " + ckpt_meta_tbl + " VALUES ($1, $2, $3)");
-      auto insv = con.Prepare("INSERT INTO " + ckpt_ver_tbl + " VALUES ($1)");
-      if (!ins || ins->HasError() || !insm || insm->HasError() || !insv ||
-          insv->HasError()) {
-        con.Query("ROLLBACK");
-        last_error_ = "checkpoint prepare failed";
+      std::string begin_error;
+      auto write = CheckpointStore::begin_write(context, catalog,
+                                                preserve_pending, begin_error);
+      if (!write) {
+        last_error_ = begin_error;
         return false;
-      }
-      {
-        auto rv = insv->Execute(
-            static_cast<int64_t>(dbsp_native::kDbspCkptFormatVersion));
-        if (rv->HasError()) {
-          con.Query("ROLLBACK");
-          last_error_ = rv->GetError();
-          return false;
-        }
       }
       // View-arrangement sidecar identity for THIS save (design note at
       // the sidecar loop below): a fresh random 16-hex id every save, so
@@ -955,77 +894,42 @@ public:
         std::snprintf(hex, sizeof(hex), "%016llx",
                       static_cast<unsigned long long>(r));
         save_id = hex;
-        auto rs = ins->Execute("saveid", "", save_seq,
-                               duckdb::Value::BLOB(save_id));
-        if (rs->HasError()) {
-          con.Query("ROLLBACK");
-          last_error_ = rs->GetError();
+        if (!write->write_save_id(save_seq, save_id)) {
+          last_error_ = write->error();
           return false;
         }
       }
       for (const auto &ck : view_blobs) {
-        for (const auto &[node_id, blob] : ck.nodes) {
-          auto r = ins->Execute(
-              "node", ck.name, static_cast<int64_t>(node_id),
-              duckdb::Value::BLOB(blob.data(), blob.size()));
-          if (r->HasError()) {
-            con.Query("ROLLBACK");
-            last_error_ = r->GetError();
-            return false;
-          }
-        }
-        auto r = ins->Execute("sink", ck.name, static_cast<int64_t>(0),
-                              duckdb::Value::BLOB(ck.sink.data(),
-                                                  ck.sink.size()));
-        if (r->HasError()) {
-          con.Query("ROLLBACK");
-          last_error_ = r->GetError();
-          return false;
-        }
-        // SQL fingerprint (Finding 1): the view's exact definition at save
-        // time, so a load whose _dbsp_views SQL has since diverged (e.g. a
-        // replace_view whose fresh checkpoint never landed before an
-        // unclean close) can detect the mismatch and decline the fast
-        // path for this view rather than misapply old operator state to
-        // a new query.
-        auto rsql = ins->Execute("sql", ck.name, static_cast<int64_t>(0),
-                                 duckdb::Value::BLOB(ck.sql));
-        if (rsql->HasError()) {
-          con.Query("ROLLBACK");
-          last_error_ = rsql->GetError();
+        if (!write->write_view(ck)) {
+          last_error_ = write->error();
           return false;
         }
       }
-      std::unordered_map<std::string, std::pair<int64_t, std::string>>
-          saved_wms;
+      std::unordered_map<std::string, SourceWatermark> saved_wms;
       int dbsp_wm_cached = 0, dbsp_wm_dirty = 0, dbsp_wm_untracked = 0,
           dbsp_wm_nohash = 0;
       DbspScopeTimer t_wm("ckpt_watermarks", std::to_string(table_names.size()) + " tables");
-      // Shared: only reads the tracked_tables_ map shape + per-table atomic
-      // flags; scoped so it releases before the post-COMMIT block takes the
-      // same mutex (same-thread recursive shared locking is UB).
+      // Shared: the cache below only reads the tracked_tables_ map shape +
+      // per-table atomic flags; scoped so it releases before the
+      // post-COMMIT block takes the same mutex (same-thread recursive
+      // shared locking is UB). The cache functions run inside this hold.
       {
-      std::shared_lock<std::shared_mutex> wm_struct_lock(struct_mutex_);
-      for (const auto &t : table_names) {
+        std::shared_lock<std::shared_mutex> wm_struct_lock(struct_mutex_);
+        WatermarkCache cache;
         // Skip the O(rows) scan for tables whose content has not changed
         // since their last scan: TrackedTable re-dirties on every content
         // mutation, and wm_begin_scan()'s exchange means a write racing
         // this scan re-dirties for the NEXT save. A stale cache can only
         // produce a load-side mismatch (safe rebuild), never a wrong adopt.
-        TrackedTable *tt = nullptr;
-        {
+        cache.lookup = [&](const std::string &t, SourceWatermark &out) {
           auto tt_it = tracked_tables_.find(t);
-          if (tt_it != tracked_tables_.end()) {
-            tt = tt_it->second.get();
+          TrackedTable *tt =
+              tt_it == tracked_tables_.end() ? nullptr : tt_it->second.get();
+          if (tt != nullptr && tt->wm_clean() && !tt->wm_hash().empty()) {
+            out = {tt->wm_count(), tt->wm_hash()};
+            dbsp_wm_cached++;
+            return true;
           }
-        }
-        int64_t wm_count = 0;
-        std::string wm_hash;
-        if (tt != nullptr && tt->wm_clean() && !tt->wm_hash().empty()) {
-          wm_count = tt->wm_count();
-          wm_hash = tt->wm_hash();
-          dbsp_wm_cached++;
-        } else {
           if (tt == nullptr) {
             dbsp_wm_untracked++;
           } else if (!tt->wm_clean()) {
@@ -1036,51 +940,30 @@ public:
           if (tt != nullptr) {
             tt->wm_begin_scan();
           }
-          // Alias must not be shadowable by a same-named column: `hash(x)`
-          // resolves to the COLUMN x when one exists, silently hashing a
-          // single column instead of the row and blinding the watermark to
-          // every other column's updates.
-          auto wm = con.Query("SELECT COUNT(*), CAST(bit_xor(hash("
-                              "__dbsp_wm_row)) AS VARCHAR) FROM " +
-                              quote_table_key(t) + " __dbsp_wm_row");
-          if (wm->HasError() || wm->RowCount() != 1) {
-            con.Query("ROLLBACK");
-            last_error_ = "checkpoint watermark failed for " + t;
-            return false;
+          return false;
+        };
+        cache.stored = [&](const std::string &t, const SourceWatermark &wm) {
+          auto tt_it = tracked_tables_.find(t);
+          if (tt_it != tracked_tables_.end()) {
+            tt_it->second->wm_store(wm.count, wm.hash);
           }
-          wm_count = wm->Collection().GetValue(0, 0).GetValue<int64_t>();
-          wm_hash = wm->Collection().GetValue(1, 0).ToString();
-          if (tt != nullptr) {
-            tt->wm_store(wm_count, wm_hash);
-          }
-        }
-        auto r = insm->Execute(t, duckdb::Value::BIGINT(wm_count), wm_hash);
-        if (r->HasError()) {
-          con.Query("ROLLBACK");
-          last_error_ = r->GetError();
+        };
+        if (!write->write_watermarks(table_names, cache, saved_wms)) {
+          last_error_ = write->error();
           return false;
         }
-        saved_wms[t] = {wm_count, wm_hash};
-      }
-      if (std::getenv("DBSP_TIMING")) {
-        std::fprintf(stderr,
-                     "[dbsp-timing] ckpt_wm_breakdown cached=%d dirty=%d "
-                     "untracked=%d nohash=%d\n",
-                     dbsp_wm_cached, dbsp_wm_dirty, dbsp_wm_untracked,
-                     dbsp_wm_nohash);
-      }
-      }
-      if (dbsp_native::g_fail_next_ckpt_commit.exchange(false)) {
-        con.Query("ROLLBACK");
-        last_error_ = "checkpoint commit failed: injected by test";
-        return false;
+        if (std::getenv("DBSP_TIMING")) {
+          std::fprintf(stderr,
+                       "[dbsp-timing] ckpt_wm_breakdown cached=%d dirty=%d "
+                       "untracked=%d nohash=%d\n",
+                       dbsp_wm_cached, dbsp_wm_dirty, dbsp_wm_untracked,
+                       dbsp_wm_nohash);
+        }
       }
       // A COMMIT that fails leaves nothing written, so it must return before
       // anything below records this save as done.
-      auto committed = con.Query("COMMIT");
-      if (!committed || committed->HasError()) {
-        last_error_ = "checkpoint commit failed: " +
-                      (committed ? committed->GetError() : "null result");
+      if (!write->commit()) {
+        last_error_ = write->error();
         return false;
       }
       last_ckpt_saved_count_ = view_blobs.size() + preserve_pending.size();
@@ -1125,7 +1008,7 @@ public:
             tl = std::unique_lock<std::shared_mutex>(*lk->second);
           }
           DbspScopeTimer t_idx("ckpt_spill_index", t);
-          tt_it->second->save_spill_index(wm.first, wm.second);
+          tt_it->second->save_spill_index(wm.count, wm.hash);
         }
         // Recovery inc 3: fingerprint sidecars for shared packed
         // arrangements, under the same just-saved watermarks. Skipped for
@@ -1195,8 +1078,8 @@ public:
             bool view_src = false;
             auto wm_it = saved_wms.find(arr->table);
             if (wm_it != saved_wms.end()) {
-              swc = wm_it->second.first;
-              swh = wm_it->second.second;
+              swc = wm_it->second.count;
+              swh = wm_it->second.hash;
             } else if (saved_views.count(arr->table) > 0) {
               view_src = true;
               swc = save_seq;
