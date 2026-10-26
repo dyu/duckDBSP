@@ -122,6 +122,8 @@ uses triggers (see "Storage version" below).
 
 ```bash
 ./build.sh
+# use it
+duckdb -cmd "LOAD './build/dbsp.duckdb_extension'"
 ```
 
 This will:
